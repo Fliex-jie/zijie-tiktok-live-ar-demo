@@ -36,11 +36,13 @@ button:disabled { cursor: not-allowed; opacity: .4; }
 .status-pill { padding: 6px 10px; border-radius: 999px; color: #9da7ba; background: rgba(255,255,255,.08); font-size: 12px; font-weight: 700; }
 .status-pill[data-state="running"] { color: #06100d; background: #8dffcf; }
 .status-pill[data-state="error"] { color: #fff0ef; background: #a73c47; }
-.metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 20px; }
+.metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-top: 20px; }
 .metric { min-height: 75px; padding: 12px; border: 1px solid rgba(255,255,255,.08); border-radius: 14px; background: rgba(255,255,255,.035); }
 .metric span { display: block; color: #8390a8; font-size: 11px; }
 .metric strong { display: block; margin-top: 9px; color: #8dffcf; font-family: "SFMono-Regular", Consolas, monospace; font-size: 18px; }
 .metric strong[data-active="false"] { color: #d0d6e1; }
+.metric strong[data-effect="smile"] { color: #7bdcff; }
+.metric strong[data-effect="laugh"] { color: #ffb17b; }
 .hint { margin: 18px 0 0; color: #a7b1c6; font-size: 13px; line-height: 1.55; }
 .footer-note { margin-top: 18px; color: #59647a; font-size: 12px; text-align: center; }
 @media (max-width: 720px) {

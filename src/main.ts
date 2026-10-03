@@ -5,7 +5,26 @@ const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmark
 const WASM_ROOT = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm';
 const INFERENCE_INTERVAL_MS = 1000 / 12;
 
-type UiState = 'idle' | 'loading' | 'ready' | 'running' | 'error';
+const SMILE_ENTER = 0.50;
+const SMILE_EXIT = 0.40;
+const LAUGH_ENTER_SMILE = 0.68;
+const LAUGH_ENTER_JAW = 0.50;
+const LAUGH_EXIT_SMILE = 0.56;
+const LAUGH_EXIT_JAW = 0.35;
+const STATE_HOLD_MS = 180;
+const FIREWORK_COOLDOWN_MS = 900;
+const MAX_PARTICLES = 520;
+
+type UiState = 'idle' | 'loading' | 'running' | 'error';
+type InteractionState = 'IDLE' | 'SMILE' | 'LAUGH';
+type ParticleKind = 'rain' | 'firework';
+
+interface HeadBounds {
+  cx: number;
+  cy: number;
+  rx: number;
+  ry: number;
+}
 
 interface FeatureSnapshot {
   faceDetected: boolean;
@@ -13,6 +32,20 @@ interface FeatureSnapshot {
   jawOpen: number;
   inferenceMs: number;
   lastUpdatedAt: number;
+  headBounds: HeadBounds | null;
+}
+
+interface Particle {
+  kind: ParticleKind;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  size: number;
+  life: number;
+  maxLife: number;
+  hue: number;
+  alpha: number;
 }
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -21,9 +54,9 @@ if (!app) throw new Error('App root not found');
 app.innerHTML = `
   <main class="shell">
     <section class="hero">
-      <div class="eyebrow">PART 2 · VIBE CODING / SPIKE 01</div>
+      <div class="eyebrow">PART 2 · VIBE CODING / SPIKE 02</div>
       <h1>雨幕与焰火</h1>
-      <p class="subtitle">先验证摄像头与面部特征，再把微笑和大笑变成实时反馈。</p>
+      <p class="subtitle">微笑让雨落下，大笑让焰火绽放；先用真实表情数据验证互动状态。</p>
     </section>
 
     <section class="stage-card">
@@ -57,8 +90,9 @@ app.innerHTML = `
         <div class="metric"><span>Jaw open</span><strong id="jaw-value">0.00</strong></div>
         <div class="metric"><span>Inference</span><strong id="inference-value">—</strong></div>
         <div class="metric"><span>Render FPS</span><strong id="fps-value">0</strong></div>
+        <div class="metric"><span>Current effect</span><strong id="effect-value">IDLE</strong></div>
       </div>
-      <p id="hint" class="hint">技术验证目标：确认摄像头、Face Landmarker 和实时指标链路可用。</p>
+      <p id="hint" class="hint">技术验证目标：确认表情状态可以稳定驱动不同效果。</p>
     </section>
 
     <footer class="footer-note">Local prototype · Camera processing stays in the browser</footer>
@@ -77,29 +111,40 @@ const smileValue = document.querySelector<HTMLElement>('#smile-value')!;
 const jawValue = document.querySelector<HTMLElement>('#jaw-value')!;
 const inferenceValue = document.querySelector<HTMLElement>('#inference-value')!;
 const fpsValue = document.querySelector<HTMLElement>('#fps-value')!;
+const effectValue = document.querySelector<HTMLElement>('#effect-value')!;
 const hint = document.querySelector<HTMLElement>('#hint')!;
 
 let faceLandmarker: FaceLandmarker | null = null;
 let stream: MediaStream | null = null;
 let uiState: UiState = 'idle';
+let interactionState: InteractionState = 'IDLE';
+let candidateState: InteractionState = 'IDLE';
+let candidateSince = 0;
+let lastFireworkAt = -Infinity;
 let lastInferenceAt = 0;
+let smoothedSmile = 0;
+let smoothedJaw = 0;
+let latestLandmarks: FaceLandmarkerResult['faceLandmarks'][number] | null = null;
 let latestFeatures: FeatureSnapshot = {
   faceDetected: false,
   smileScore: 0,
   jawOpen: 0,
   inferenceMs: 0,
   lastUpdatedAt: 0,
+  headBounds: null,
 };
 let frameCount = 0;
 let lastFpsAt = performance.now();
 let renderFps = 0;
+let previousRenderAt = performance.now();
+let rainAccumulator = 0;
+const particles: Particle[] = [];
 
 function setUiState(next: UiState, message?: string): void {
   uiState = next;
   const labels: Record<UiState, string> = {
     idle: '未启动',
     loading: '加载中',
-    ready: '已就绪',
     running: '运行中',
     error: '需要处理',
   };
@@ -125,6 +170,8 @@ function updateHud(): void {
   jawValue.textContent = latestFeatures.jawOpen.toFixed(2);
   inferenceValue.textContent = latestFeatures.lastUpdatedAt ? `${latestFeatures.inferenceMs.toFixed(1)} ms` : '—';
   fpsValue.textContent = String(renderFps);
+  effectValue.textContent = interactionState;
+  effectValue.dataset.effect = interactionState.toLowerCase();
 }
 
 function getBlendshapeScore(result: FaceLandmarkerResult, name: string): number {
@@ -132,34 +179,219 @@ function getBlendshapeScore(result: FaceLandmarkerResult, name: string): number 
   return categories.find((category) => category.categoryName === name)?.score ?? 0;
 }
 
-function readFeatures(result: FaceLandmarkerResult, inferenceMs: number): FeatureSnapshot {
-  const hasFace = result.faceLandmarks.length > 0;
-  const leftSmile = getBlendshapeScore(result, 'mouthSmileLeft');
-  const rightSmile = getBlendshapeScore(result, 'mouthSmileRight');
+function getHeadBounds(landmarks: FaceLandmarkerResult['faceLandmarks'][number], rect: DOMRect): HeadBounds {
+  let minX = 1;
+  let maxX = 0;
+  let minY = 1;
+  let maxY = 0;
+  for (const point of landmarks) {
+    minX = Math.min(minX, point.x);
+    maxX = Math.max(maxX, point.x);
+    minY = Math.min(minY, point.y);
+    maxY = Math.max(maxY, point.y);
+  }
+  const width = (maxX - minX) * rect.width;
+  const height = (maxY - minY) * rect.height;
   return {
-    faceDetected: hasFace,
-    smileScore: (leftSmile + rightSmile) / 2,
-    jawOpen: getBlendshapeScore(result, 'jawOpen'),
-    inferenceMs,
-    lastUpdatedAt: performance.now(),
+    cx: ((minX + maxX) / 2) * rect.width,
+    cy: ((minY + maxY) / 2) * rect.height,
+    rx: Math.max(48, width * 0.62),
+    ry: Math.max(60, height * 0.68),
   };
 }
 
-function drawDebugFace(result: FaceLandmarkerResult): void {
-  if (!ctx || result.faceLandmarks.length === 0) return;
-  const rect = video.getBoundingClientRect();
-  const landmarks = result.faceLandmarks[0];
-  ctx.save();
-  ctx.strokeStyle = 'rgba(141, 255, 207, 0.75)';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  for (const point of landmarks) {
-    const x = (1 - point.x) * rect.width;
-    const y = point.y * rect.height;
-    ctx.moveTo(x + 1.5, y);
-    ctx.arc(x, y, 1.5, 0, Math.PI * 2);
+function readFeatures(result: FaceLandmarkerResult, inferenceMs: number, rect: DOMRect): FeatureSnapshot {
+  const hasFace = result.faceLandmarks.length > 0;
+  const leftSmile = getBlendshapeScore(result, 'mouthSmileLeft');
+  const rightSmile = getBlendshapeScore(result, 'mouthSmileRight');
+  const smileScore = (leftSmile + rightSmile) / 2;
+  const jawOpen = getBlendshapeScore(result, 'jawOpen');
+  smoothedSmile = smoothedSmile * 0.72 + smileScore * 0.28;
+  smoothedJaw = smoothedJaw * 0.72 + jawOpen * 0.28;
+  return {
+    faceDetected: hasFace,
+    smileScore: smoothedSmile,
+    jawOpen: smoothedJaw,
+    inferenceMs,
+    lastUpdatedAt: performance.now(),
+    headBounds: hasFace ? getHeadBounds(result.faceLandmarks[0], rect) : null,
+  };
+}
+
+function desiredInteractionState(): InteractionState {
+  if (!latestFeatures.faceDetected) return 'IDLE';
+
+  // Hysteresis: once in LAUGH or SMILE, use softer exit thresholds to avoid flicker.
+  if (interactionState === 'LAUGH' && smoothedSmile >= LAUGH_EXIT_SMILE && smoothedJaw >= LAUGH_EXIT_JAW) return 'LAUGH';
+  if (interactionState === 'SMILE' && smoothedSmile >= SMILE_EXIT && smoothedJaw <= 0.50) return 'SMILE';
+
+  if (smoothedSmile >= LAUGH_ENTER_SMILE && smoothedJaw >= LAUGH_ENTER_JAW) return 'LAUGH';
+  if (smoothedSmile >= SMILE_ENTER && smoothedJaw <= 0.38) return 'SMILE';
+  return 'IDLE';
+}
+
+function transitionInteraction(next: InteractionState, now: number): void {
+  if (next === interactionState) return;
+  const previous = interactionState;
+  interactionState = next;
+  updateHud();
+
+  if (next === 'LAUGH' && now - lastFireworkAt >= FIREWORK_COOLDOWN_MS) {
+    spawnFirework();
+    lastFireworkAt = now;
   }
-  ctx.stroke();
+
+  const messages: Record<InteractionState, string> = {
+    IDLE: '状态稳定：保持自然表情，效果会逐渐停下。',
+    SMILE: '检测到微笑：雨幕已启动。',
+    LAUGH: '检测到大笑：焰火已触发，粒子会与头部边界互动。',
+  };
+  hint.textContent = messages[next];
+  console.info(`[interaction] ${previous} → ${next}`, { smile: smoothedSmile.toFixed(2), jaw: smoothedJaw.toFixed(2) });
+}
+
+function updateInteraction(now: number): void {
+  const desired = desiredInteractionState();
+  if (desired !== candidateState) {
+    candidateState = desired;
+    candidateSince = now;
+  }
+  if (candidateState !== interactionState && now - candidateSince >= STATE_HOLD_MS) {
+    transitionInteraction(candidateState, now);
+  }
+}
+
+function drawDebugFace(): void {
+  if (!ctx || !latestLandmarks) return;
+  const rect = video.getBoundingClientRect();
+  ctx.save();
+  ctx.fillStyle = 'rgba(141, 255, 207, 0.72)';
+  for (const point of latestLandmarks) {
+    // Canvas is mirrored with the video via CSS, so source coordinates stay unflipped here.
+    const x = point.x * rect.width;
+    const y = point.y * rect.height;
+    ctx.beginPath();
+    ctx.arc(x, y, 1.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function pushParticle(particle: Particle): void {
+  if (particles.length >= MAX_PARTICLES) particles.shift();
+  particles.push(particle);
+}
+
+function spawnRainDrop(width: number): void {
+  pushParticle({
+    kind: 'rain',
+    x: Math.random() * width,
+    y: -12,
+    vx: -10 + Math.random() * 20,
+    vy: 250 + Math.random() * 180,
+    size: 7 + Math.random() * 10,
+    life: 2.2,
+    maxLife: 2.2,
+    hue: 188 + Math.random() * 35,
+    alpha: 0.28 + Math.random() * 0.34,
+  });
+}
+
+function spawnFirework(): void {
+  const rect = video.getBoundingClientRect();
+  const bounds = latestFeatures.headBounds;
+  const originX = bounds?.cx ?? rect.width * 0.5;
+  const originY = bounds ? Math.max(48, bounds.cy - bounds.ry * 1.35) : rect.height * 0.35;
+  const count = 84;
+  const hue = 28 + Math.random() * 100;
+  for (let index = 0; index < count; index += 1) {
+    const angle = (Math.PI * 2 * index) / count + (Math.random() - 0.5) * 0.16;
+    const speed = 100 + Math.random() * 260;
+    pushParticle({
+      kind: 'firework',
+      x: originX,
+      y: originY,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      size: 2 + Math.random() * 2.6,
+      life: 0.75 + Math.random() * 0.55,
+      maxLife: 1.3,
+      hue: hue + (Math.random() - 0.5) * 35,
+      alpha: 0.8 + Math.random() * 0.2,
+    });
+  }
+}
+
+function collideWithHead(particle: Particle, bounds: HeadBounds): void {
+  const dx = (particle.x - bounds.cx) / bounds.rx;
+  const dy = (particle.y - bounds.cy) / bounds.ry;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  if (distance >= 1) return;
+
+  const safeDistance = Math.max(distance, 0.001);
+  const nx = dx / safeDistance;
+  const ny = dy / safeDistance;
+  particle.x = bounds.cx + nx * bounds.rx * 1.02;
+  particle.y = bounds.cy + ny * bounds.ry * 1.02;
+  const velocityAlongNormal = particle.vx * nx + particle.vy * ny;
+  if (velocityAlongNormal < 0) {
+    particle.vx -= 1.65 * velocityAlongNormal * nx;
+    particle.vy -= 1.65 * velocityAlongNormal * ny;
+    particle.vx *= 0.72;
+    particle.vy *= 0.72;
+  }
+}
+
+function updateParticles(deltaSeconds: number, rect: DOMRect): void {
+  if (interactionState === 'SMILE') {
+    rainAccumulator += deltaSeconds * 155;
+    while (rainAccumulator >= 1) {
+      spawnRainDrop(rect.width);
+      rainAccumulator -= 1;
+    }
+  } else {
+    rainAccumulator = Math.min(rainAccumulator, 1);
+  }
+
+  for (let index = particles.length - 1; index >= 0; index -= 1) {
+    const particle = particles[index];
+    particle.life -= deltaSeconds;
+    if (particle.life <= 0 || particle.y > rect.height + 40 || particle.x < -80 || particle.x > rect.width + 80) {
+      particles.splice(index, 1);
+      continue;
+    }
+
+    if (particle.kind === 'rain') {
+      particle.vy += 60 * deltaSeconds;
+    } else {
+      particle.vy += 300 * deltaSeconds;
+      if (latestFeatures.headBounds) collideWithHead(particle, latestFeatures.headBounds);
+    }
+    particle.x += particle.vx * deltaSeconds;
+    particle.y += particle.vy * deltaSeconds;
+  }
+}
+
+function drawParticles(): void {
+  if (!ctx) return;
+  ctx.save();
+  for (const particle of particles) {
+    const lifeRatio = Math.max(0, particle.life / particle.maxLife);
+    ctx.globalAlpha = particle.alpha * Math.min(1, lifeRatio * 1.8);
+    ctx.strokeStyle = `hsla(${particle.hue}, 100%, 78%, 1)`;
+    ctx.fillStyle = `hsla(${particle.hue}, 100%, 70%, 1)`;
+    if (particle.kind === 'rain') {
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(particle.x, particle.y);
+      ctx.lineTo(particle.x - particle.vx * 0.012, particle.y - particle.vy * 0.022);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.arc(particle.x, particle.y, particle.size * (0.7 + lifeRatio * 0.4), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
   ctx.restore();
 }
 
@@ -179,11 +411,17 @@ function render(now: number): void {
     lastInferenceAt = now;
     const inferenceStart = performance.now();
     const result = faceLandmarker.detectForVideo(video, now);
-    latestFeatures = readFeatures(result, performance.now() - inferenceStart);
-    drawDebugFace(result);
+    latestLandmarks = result.faceLandmarks[0] ?? null;
+    latestFeatures = readFeatures(result, performance.now() - inferenceStart, rect);
+    updateInteraction(now);
     updateHud();
   }
 
+  const deltaSeconds = Math.min(0.05, (now - previousRenderAt) / 1000);
+  previousRenderAt = now;
+  updateParticles(deltaSeconds, rect);
+  drawParticles();
+  drawDebugFace();
   requestAnimationFrame(render);
 }
 
@@ -217,7 +455,7 @@ async function startExperience(): Promise<void> {
     faceLandmarker = await createLandmarker();
     stageMessage.classList.add('hidden');
     resetButton.disabled = false;
-    setUiState('running', '技术验证进行中：请对着摄像头做自然微笑和张嘴动作，观察分数变化。');
+    setUiState('running', '请自然微笑、露齿大笑或张嘴，观察效果状态如何区分。');
   } catch (error) {
     console.error(error);
     const message = error instanceof DOMException && error.name === 'NotAllowedError'
@@ -237,14 +475,21 @@ function resetExperience(): void {
   video.srcObject = null;
   faceLandmarker?.close();
   faceLandmarker = null;
-  latestFeatures = { faceDetected: false, smileScore: 0, jawOpen: 0, inferenceMs: 0, lastUpdatedAt: 0 };
+  latestLandmarks = null;
+  particles.length = 0;
+  smoothedSmile = 0;
+  smoothedJaw = 0;
+  interactionState = 'IDLE';
+  candidateState = 'IDLE';
+  previousRenderAt = performance.now();
+  latestFeatures = { faceDetected: false, smileScore: 0, jawOpen: 0, inferenceMs: 0, lastUpdatedAt: 0, headBounds: null };
   updateHud();
   stageMessage.classList.remove('hidden');
   stageMessage.querySelector('strong')!.textContent = '点击开始体验';
   stageMessage.querySelector('span')!.textContent = '本阶段只读取摄像头和面部特征，不会保存画面。';
   resetButton.disabled = true;
   startButton.disabled = false;
-  setUiState('idle', '技术验证目标：确认摄像头、Face Landmarker 和实时指标链路可用。');
+  setUiState('idle', '技术验证目标：确认表情状态可以稳定驱动不同效果。');
 }
 
 startButton.addEventListener('click', () => void startExperience());
