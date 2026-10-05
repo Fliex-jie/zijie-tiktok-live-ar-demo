@@ -188,69 +188,96 @@ const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('App root not found');
 
 app.innerHTML = `
-  <main class="shell">
-    <section class="hero">
-      <div class="eyebrow">PART 2 · VIBE CODING / SPIKE 02</div>
-      <h1>雨幕与焰火</h1>
-      <p class="subtitle">微笑让雨落下，大笑让焰火绽放；用面部与声音两条感知链模拟直播互动。</p>
-    </section>
+  <div class="app-frame">
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="TikTok Studio 首页">
+        <span class="brand-mark" aria-hidden="true"><img src="/assets/tiktok-live-logo.png" alt="" width="96" height="96" /></span>
+        <span>TikTok <b>Studio</b></span>
+      </a>
+      <div class="topbar-actions">
+        <img class="profile-avatar" src="/assets/profile-zijie.png" alt="子杰的头像" width="28" height="28" /><span class="profile-name">子杰</span>
+        <button class="icon-button" type="button" aria-label="帮助"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9a2.5 2.5 0 0 1 4.8 1c0 1.7-2.4 2-2.4 3.5M12 17.5h.01"/></svg></button>
+        <button class="icon-button" type="button" aria-label="菜单"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      </div>
+    </header>
 
-    <section class="stage-card">
-      <div class="stage-wrap">
-        <video id="camera" autoplay muted playsinline></video>
-        <div class="rain-grade" aria-hidden="true"></div>
-        <video
-          id="rain-footage"
-          class="rain-footage"
-          src="/assets/rain-overlay-candidate.mp4"
-          muted
-          loop
-          playsinline
-          preload="metadata"
-          aria-hidden="true"
-        ></video>
-        <canvas id="overlay"></canvas>
-        <div class="stage-shade"></div>
-        <div id="stage-message" class="stage-message">
-          <div class="message-icon">◌</div>
-          <strong>点击开始体验</strong>
-          <span>默认只读取摄像头；声音辅助需主动开启，所有分析都在浏览器本地完成。</span>
-        </div>
-      </div>
-      <div class="controls">
-        <button id="start-button" class="primary-button">开始体验</button>
-        <button id="reset-button" class="ghost-button" disabled>重置</button>
-        <button id="audio-button" class="ghost-button" disabled aria-pressed="false">启用声音辅助</button>
-      </div>
-    </section>
+    <main class="shell">
+      <div class="broadcast-grid">
+        <aside class="scene-sidebar" aria-label="场景与来源">
+          <section class="sidebar-section">
+            <div class="sidebar-heading"><h2>场景</h2><button type="button" aria-label="新增场景">＋</button></div>
+            <button class="scene-item active" type="button">
+              <span class="scene-thumb"><i></i><b>AR</b></span>
+              <span><strong>互动直播间</strong><small>雨幕与烟花</small></span>
+              <em aria-hidden="true">•••</em>
+            </button>
+          </section>
+          <section class="sidebar-section sources-section">
+            <div class="sidebar-heading"><h2>来源</h2><button type="button" aria-label="新增来源">＋</button></div>
+            <button class="source-item active" type="button">
+              <span class="source-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 10.5 20 8v8l-5-2.5v-3Z"/><rect x="3" y="6" width="12" height="12" rx="3"/></svg></span>
+              <span><strong>摄像头</strong><small>FaceTime HD Camera</small></span>
+              <svg class="eye-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+            </button>
+            <button class="source-item" type="button">
+              <span class="source-icon effect-source"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 1.2 5.4L18 4.5l-2.8 4.8L21 10l-5.5 1.7 4 4-5.2-2.3L14 19l-2-5-2 5-.3-5.6-5.2 2.3 4-4L3 10l5.8-.7L6 4.5l4.8 2.9L12 2Z"/></svg></span>
+              <span><strong>AR 特效</strong><small>表情驱动 · 已启用</small></span>
+              <svg class="eye-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+            </button>
+          </section>
+          <div class="sidebar-footer"><button type="button"><span>＋</span>添加来源</button><button type="button">清除</button></div>
+        </aside>
 
-    <section class="hud-card">
-      <div class="hud-header">
-        <div>
-          <div class="section-label">DEBUG HUD</div>
-          <h2>感知状态</h2>
-        </div>
-        <span id="status-pill" class="status-pill">未启动</span>
-      </div>
-      <div class="metrics">
-        <div class="metric"><span>Face detected</span><strong id="face-value">—</strong></div>
-        <div class="metric"><span>Smile score</span><strong id="smile-value">0.00</strong></div>
-        <div class="metric"><span>Jaw open</span><strong id="jaw-value">0.00</strong></div>
-        <div class="metric"><span>Lip press</span><strong id="lip-press-value">0.00</strong></div>
-        <div class="metric"><span>Inference</span><strong id="inference-value">—</strong></div>
-        <div class="metric"><span>Render FPS</span><strong id="fps-value">0</strong></div>
-        <div class="metric"><span>Current effect</span><strong id="effect-value">IDLE</strong></div>
-        <div class="metric"><span>Audio signal</span><strong id="audio-value">OFF</strong></div>
-      </div>
-      <div class="audio-status-row">
-        <span id="audio-status" class="audio-status" data-enabled="false">声音辅助关闭 · 不读取麦克风</span>
-        <span class="audio-note">开启后仅在浏览器本地分析音量，不保存音频。</span>
-      </div>
-      <p id="hint" class="hint">技术验证目标：确认表情状态可以稳定驱动不同效果。</p>
-    </section>
+        <section id="live-stage" class="stage-card" aria-label="直播画面与控制">
+          <div class="stage-header">
+            <h1>子杰 is LIVE</h1>
+            <div class="orientation-switch" role="group" aria-label="直播画面方向">
+              <button class="active" type="button" data-orientation="landscape" aria-pressed="true">横屏</button>
+              <button type="button" data-orientation="portrait" aria-pressed="false">竖屏</button>
+            </div>
+          </div>
+          <div class="stage-wrap">
+            <video id="camera" autoplay muted playsinline></video>
+            <div class="rain-grade" aria-hidden="true"></div>
+            <video id="rain-footage" class="rain-footage" src="/assets/rain-overlay-candidate.mp4" muted loop playsinline preload="metadata" aria-hidden="true"></video>
+            <canvas id="overlay"></canvas><div class="stage-shade"></div>
+            <div id="stage-message" class="stage-message">
+              <div class="message-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M15 10.5 19.5 8v8L15 13.5v-3Z"/><rect x="3" y="6" width="12" height="12" rx="3"/></svg></div>
+              <strong>开启直播预览</strong><span>允许摄像头后即可预览实时特效。</span>
+            </div>
+          </div>
+          <div class="controls">
+            <button id="start-button" class="primary-button">开始体验</button>
+            <button id="reset-button" class="ghost-button" disabled>重置</button>
+            <button id="audio-button" class="ghost-button" disabled aria-pressed="false">开启声音辅助</button>
+          </div>
+        </section>
 
-    <footer class="footer-note">Local prototype · Camera processing stays in the browser</footer>
-  </main>
+        <aside id="interaction-panel" class="interaction-panel" aria-label="直播互动区">
+          <section class="viewer-panel">
+            <div class="panel-heading"><h2>观众列表</h2><button type="button" aria-label="弹出观众列表"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></button></div>
+            <div class="empty-viewers" aria-label="暂无观众"></div>
+          </section>
+          <section class="live-chat-panel">
+            <div class="panel-heading"><h2>直播聊天</h2><button type="button" aria-label="弹出直播聊天"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></button></div>
+            <div id="chat-feed" class="chat-feed" aria-label="直播消息" aria-live="polite">
+              <div class="chat-message"><span class="chat-avatar cyan">A</span><p><span>Hello host</span></p></div>
+              <div class="chat-message"><span class="chat-avatar violet">M</span><p><span>Great stream</span></p></div>
+            </div>
+            <form id="chat-form" class="chat-composer">
+              <label class="visually-hidden" for="chat-input">直播消息</label>
+              <input id="chat-input" type="text" maxlength="200" autocomplete="off" placeholder="输入消息..." />
+              <button id="chat-send" type="submit" disabled>发送</button>
+            </form>
+          </section>
+        </aside>
+      </div>
+
+      <section class="runtime-data" aria-hidden="true">
+        <span id="status-pill">未启动</span><span id="face-value">—</span><span id="smile-value">0.00</span><span id="jaw-value">0.00</span><span id="lip-press-value">0.00</span><span id="inference-value">—</span><span id="fps-value">0</span><span id="effect-value">IDLE</span><span id="audio-value">OFF</span><span id="audio-status" data-enabled="false">声音辅助关闭</span><span id="hint"></span>
+      </section>
+    </main>
+  </div>
 `;
 
 const video = document.querySelector<HTMLVideoElement>('#camera')!;
@@ -261,6 +288,12 @@ const ctx = canvas.getContext('2d');
 const startButton = document.querySelector<HTMLButtonElement>('#start-button')!;
 const resetButton = document.querySelector<HTMLButtonElement>('#reset-button')!;
 const audioButton = document.querySelector<HTMLButtonElement>('#audio-button')!;
+const liveStage = document.querySelector<HTMLElement>('#live-stage')!;
+const orientationButtons = [...document.querySelectorAll<HTMLButtonElement>('.orientation-switch button')];
+const chatFeed = document.querySelector<HTMLDivElement>('#chat-feed')!;
+const chatForm = document.querySelector<HTMLFormElement>('#chat-form')!;
+const chatInput = document.querySelector<HTMLInputElement>('#chat-input')!;
+const chatSend = document.querySelector<HTMLButtonElement>('#chat-send')!;
 const stageMessage = document.querySelector<HTMLDivElement>('#stage-message')!;
 const statusPill = document.querySelector<HTMLSpanElement>('#status-pill')!;
 const faceValue = document.querySelector<HTMLElement>('#face-value')!;
@@ -361,6 +394,40 @@ function resizeCanvas(): void {
   canvas.style.width = `${rect.width}px`;
   canvas.style.height = `${rect.height}px`;
   ctx?.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function setStageOrientation(orientation: 'landscape' | 'portrait'): void {
+  liveStage.dataset.orientation = orientation;
+  for (const button of orientationButtons) {
+    const isActive = button.dataset.orientation === orientation;
+    button.classList.toggle('active', isActive);
+    button.setAttribute('aria-pressed', String(isActive));
+  }
+  requestAnimationFrame(resizeCanvas);
+}
+
+function updateChatSendState(): void {
+  chatSend.disabled = chatInput.value.trim().length === 0;
+}
+
+function appendChatMessage(message: string): void {
+  const item = document.createElement('div');
+  item.className = 'chat-message chat-message-own';
+
+  const avatar = document.createElement('img');
+  avatar.className = 'chat-avatar chat-avatar-photo';
+  avatar.src = '/assets/profile-zijie.png';
+  avatar.alt = '';
+  avatar.width = 27;
+  avatar.height = 27;
+
+  const text = document.createElement('p');
+  const content = document.createElement('span');
+  content.textContent = message;
+  text.append(content);
+  item.append(avatar, text);
+  chatFeed.append(item);
+  chatFeed.scrollTop = chatFeed.scrollHeight;
 }
 
 function updateHud(): void {
@@ -485,7 +552,7 @@ async function enableAudioAssist(): Promise<void> {
     console.error(error);
     audioStream?.getTracks().forEach((track) => track.stop());
     audioStream = null;
-    audioButton.textContent = '启用声音辅助';
+    audioButton.textContent = '开启声音辅助';
     audioButton.disabled = false;
     updateAudioStatus('麦克风未启用 · 继续使用纯视觉模式', false);
     hint.textContent = error instanceof DOMException && error.name === 'NotAllowedError'
@@ -511,7 +578,7 @@ function disableAudioAssist(): void {
   audioNoiseFloor = 0.005;
   audioPeak = 0.025;
   audioBurstTimes = [];
-  audioButton.textContent = '启用声音辅助';
+  audioButton.textContent = '开启声音辅助';
   audioButton.disabled = uiState !== 'running';
   updateAudioStatus('声音辅助关闭 · 不读取麦克风', false);
   updateHud();
@@ -1742,6 +1809,7 @@ function render(now: number): void {
     previewInitialized = true;
     stageMessage.hidden = true;
     stageMessage.classList.add('hidden');
+    startButton.textContent = '体验中';
     uiState = 'running';
     interactionState = 'SMILE';
     stateEnteredAt = now;
@@ -1922,10 +1990,11 @@ function resetExperience(): void {
   };
   updateHud();
   stageMessage.classList.remove('hidden');
-  stageMessage.querySelector('strong')!.textContent = '点击开始体验';
-  stageMessage.querySelector('span')!.textContent = '默认只读取摄像头；声音辅助需主动开启，所有分析都在浏览器本地完成。';
+  stageMessage.querySelector('strong')!.textContent = '开启直播预览';
+  stageMessage.querySelector('span')!.textContent = '允许摄像头后即可预览表情驱动的实时特效。';
   resetButton.disabled = true;
   startButton.disabled = false;
+  startButton.textContent = '开始体验';
   audioButton.disabled = true;
   setUiState('idle', '技术验证目标：确认表情状态可以稳定驱动不同效果。');
 }
@@ -1933,6 +2002,24 @@ function resetExperience(): void {
 startButton.addEventListener('click', () => void startExperience());
 resetButton.addEventListener('click', resetExperience);
 audioButton.addEventListener('click', () => void enableAudioAssist());
+for (const button of orientationButtons) {
+  button.addEventListener('click', () => {
+    const orientation = button.dataset.orientation;
+    if (orientation === 'landscape' || orientation === 'portrait') setStageOrientation(orientation);
+  });
+}
+chatInput.addEventListener('input', updateChatSendState);
+chatForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const message = chatInput.value.trim();
+  if (!message) return;
+  appendChatMessage(message);
+  chatInput.value = '';
+  updateChatSendState();
+  chatInput.focus();
+});
 window.addEventListener('resize', resizeCanvas);
+setStageOrientation('landscape');
+updateChatSendState();
 setUiState('idle');
 requestAnimationFrame(render);
