@@ -15,8 +15,12 @@ const WASM_ROOT = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/
 const INFERENCE_INTERVAL_MS = 1000 / 10;
 const RENDER_INTERVAL_MS = 1000 / 60;
 const MAX_CANVAS_DPR = 1.5;
-const SHOW_DEBUG_LANDMARKS = new URLSearchParams(window.location.search).has('debug');
-const PREVIEW_FIREWORK = new URLSearchParams(window.location.search).get('preview') === 'firework';
+const URL_PARAMS = new URLSearchParams(window.location.search);
+const SHOW_DEBUG_LANDMARKS = URL_PARAMS.has('debug');
+const PREVIEW_MODE = URL_PARAMS.get('preview');
+const PREVIEW_FIREWORK = PREVIEW_MODE === 'firework' || PREVIEW_MODE === 'collision';
+const PREVIEW_HEAD_SWEEP = PREVIEW_MODE === 'collision';
+const PREVIEW_RAIN = PREVIEW_MODE === 'rain';
 
 // The model reports a new value every frame, so the thresholds deliberately
 // use a gap between entering and leaving a state (hysteresis). This keeps a
@@ -562,9 +566,12 @@ function getHeadBounds(landmarks: FaceLandmarkerResult['faceLandmarks'][number],
     : 0;
   return {
     cx: (minX + maxX) / 2,
-    cy: (minY + maxY) / 2,
-    rx: Math.max(48, width * 0.62),
-    ry: Math.max(60, height * 0.68),
+    // Face landmarks stop at the forehead, while users perceive hair as part
+    // of the physical head. Shift the collider upward and extend its crown so
+    // sparks do not visibly travel through hair before reacting.
+    cy: (minY + maxY) / 2 - height * 0.12,
+    rx: Math.max(48, width * 0.65),
+    ry: Math.max(60, height * 0.74),
     angle,
     scale: Math.max(width / Math.max(1, rect.width), height / Math.max(1, rect.height)),
   };
@@ -1372,7 +1379,7 @@ function updateEffectMix(deltaSeconds: number): void {
   // remain in front for depth and responsiveness. Opacity follows the same
   // eased mix, so a short classification spike cannot hard-flash the video.
   stageWrap.style.setProperty('--rain-grade-opacity', (smileEffectMix * 0.06).toFixed(3));
-  stageWrap.style.setProperty('--rain-footage-opacity', (smileEffectMix * 0.42).toFixed(3));
+  stageWrap.style.setProperty('--rain-footage-opacity', (smileEffectMix * 0.54).toFixed(3));
   const shouldPlay = uiState === 'running' && interactionState === 'SMILE';
   if (shouldPlay && !rainFootagePlaying) {
     rainFootagePlaying = true;
@@ -1621,10 +1628,20 @@ function render(now: number): void {
     renderFps = frameCount;
     frameCount = 0;
     lastFpsAt = now;
-    if (PREVIEW_FIREWORK) updateHud();
+    if (PREVIEW_FIREWORK || PREVIEW_RAIN) updateHud();
   }
 
   const rect = video.getBoundingClientRect();
+  if (PREVIEW_RAIN && !previewInitialized && rect.width > 0) {
+    previewInitialized = true;
+    stageMessage.hidden = true;
+    stageMessage.classList.add('hidden');
+    uiState = 'running';
+    interactionState = 'SMILE';
+    stateEnteredAt = now;
+    smileEffectMix = 1;
+    stageWrap.classList.add('rain-active');
+  }
   if (PREVIEW_FIREWORK && !previewInitialized && rect.width > 0) {
     previewInitialized = true;
     stageMessage.hidden = true;
@@ -1653,6 +1670,16 @@ function render(now: number): void {
   ctx?.clearRect(0, 0, rect.width, rect.height);
   sampleAudio(now);
 
+  if (PREVIEW_HEAD_SWEEP && latestFeatures.headBounds) {
+    const sweepProgress = now / 520;
+    latestFeatures.headBounds = {
+      ...latestFeatures.headBounds,
+      cx: rect.width * 0.5 + Math.sin(sweepProgress) * rect.width * 0.18,
+      cy: rect.height * 0.62 + Math.sin(sweepProgress * 0.54) * rect.height * 0.035,
+      angle: Math.sin(sweepProgress * 0.72) * 0.10,
+    };
+  }
+
   if (faceLandmarker && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && now - lastInferenceAt >= INFERENCE_INTERVAL_MS) {
     const inferenceStart = performance.now();
     const result = faceLandmarker.detectForVideo(video, now);
@@ -1667,7 +1694,7 @@ function render(now: number): void {
   // State confirmation is time-based, so check it on render frames instead
   // of waiting for the next 10 Hz inference tick. This removes a perceptible
   // extra delay when SMILE upgrades to LAUGH without increasing model load.
-  if (uiState === 'running' && !PREVIEW_FIREWORK) updateInteraction(performance.now());
+  if (uiState === 'running' && !PREVIEW_FIREWORK && !PREVIEW_RAIN) updateInteraction(performance.now());
 
   const deltaSeconds = Math.min(0.05, (now - previousRenderAt) / 1000);
   previousRenderAt = now;
@@ -1676,8 +1703,10 @@ function render(now: number): void {
   updateParticles(deltaSeconds, rect);
   updateRainRipples(deltaSeconds);
   proceduralFireworks.update(deltaSeconds, latestFeatures.headBounds);
+  if (PREVIEW_RAIN) canvas.dataset.activeParticles = String(particles.length);
   if (PREVIEW_FIREWORK) {
     canvas.dataset.collisionHits = String(proceduralFireworks.collisionCount);
+    canvas.dataset.activeCollisionHits = String(proceduralFireworks.activeCollisionCount);
     canvas.dataset.activeParticles = String(proceduralFireworks.activeCount);
   }
   drawStageAtmosphere(rect);

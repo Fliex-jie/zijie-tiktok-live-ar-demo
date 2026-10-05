@@ -26,6 +26,8 @@ type Spark = {
   drag: number;
   curveBias: number;
   color: string;
+  glow: number;
+  detailPhase: number;
   collisionCooldown: number;
   collisionCount: number;
   touchingHead: boolean;
@@ -38,6 +40,10 @@ type BurstFlash = {
   life: number;
   radius: number;
   color: string;
+  kind: 'burst' | 'impact';
+  nx: number;
+  ny: number;
+  strength: number;
 };
 
 type Collision = {
@@ -57,10 +63,26 @@ type TrailGeometry = {
   headY: number;
 };
 
-const PEARL_PALETTE = ['#fffaff', '#ded2ff', '#ff9ee2', '#c6b8ff'];
-const GOLD_PALETTE = ['#fff2bd', '#ffd86b'];
+type BurstTheme = {
+  pearls: readonly string[];
+  golds: readonly string[];
+};
+
+// A burst uses one coherent pearl theme instead of sampling the entire palette
+// independently per spark. Alternating a cool lavender and a pink-champagne
+// family keeps successive bursts varied while preserving one clear identity.
+const BURST_THEMES: readonly BurstTheme[] = [
+  {
+    pearls: ['#ffffff', '#e8deff', '#cab2ff', '#aa8cff'],
+    golds: ['#fff1a8', '#ffd15a'],
+  },
+  {
+    pearls: ['#ffffff', '#ffd9f1', '#ff8fd4', '#d8baff'],
+    golds: ['#fff0a0', '#ffc95c'],
+  },
+];
 const MAX_SPARKS = 220;
-const MAX_FLASHES = 4;
+const MAX_FLASHES = 6;
 const TRAIL_TIME_WINDOW = 0.132;
 const TRAIL_CURVE_GRAVITY_GAIN = 5.2;
 const TRAIL_DRAW_SEGMENTS = 12;
@@ -225,9 +247,9 @@ function findEllipseCollision(spark: Spark, bounds: FireworkHeadBounds): Collisi
   };
 }
 
-function chooseColor(index: number, goldShare: number): string {
-  if ((index * 17) % 100 < goldShare * 100) return GOLD_PALETTE[index % GOLD_PALETTE.length];
-  return PEARL_PALETTE[index % PEARL_PALETTE.length];
+function chooseColor(index: number, goldShare: number, theme: BurstTheme): string {
+  if ((index * 17) % 100 < goldShare * 100) return theme.golds[index % theme.golds.length];
+  return theme.pearls[index % theme.pearls.length];
 }
 
 function withAlpha(hex: string, alpha: number): string {
@@ -308,6 +330,43 @@ function traceTaperedSpark(
   target.closePath();
 }
 
+function drawDerivedAfterglow(
+  target: CanvasRenderingContext2D,
+  geometry: TrailGeometry,
+  radius: number,
+  detailPhase: number,
+  alpha: number,
+): void {
+  // Only a little over half the streaks receive two micro-sparks. These are
+  // derived from the visible curve rather than simulated particles, so the
+  // richer trail adds no update state, collision tests, or per-frame objects.
+  if (detailPhase > Math.PI * 1.12) return;
+  const tangentX = geometry.controlX - geometry.tailX;
+  const tangentY = geometry.controlY - geometry.tailY;
+  const tangentLength = Math.max(0.001, Math.hypot(tangentX, tangentY));
+  const ux = tangentX / tangentLength;
+  const uy = tangentY / tangentLength;
+  const nx = -uy;
+  const ny = ux;
+
+  for (let step = 0; step < 2; step += 1) {
+    const distance = radius * (2.0 + step * 2.7);
+    const lateralOffset = Math.sin(detailPhase + step * 2.35)
+      * radius
+      * (0.26 + step * 0.16);
+    target.globalAlpha = alpha * (0.28 - step * 0.09);
+    target.beginPath();
+    target.arc(
+      geometry.tailX - ux * distance + nx * lateralOffset,
+      geometry.tailY - uy * distance + ny * lateralOffset,
+      Math.max(0.64, radius * (0.28 - step * 0.045)),
+      0,
+      Math.PI * 2,
+    );
+    target.fill();
+  }
+}
+
 export class ProceduralFireworkSystem {
   private sparks: Spark[] = [];
   private flashes: BurstFlash[] = [];
@@ -318,6 +377,7 @@ export class ProceduralFireworkSystem {
   private headVelocityX = 0;
   private headVelocityY = 0;
   collisionCount = 0;
+  activeCollisionCount = 0;
 
   get activeCount(): number {
     return this.sparks.length;
@@ -332,84 +392,163 @@ export class ProceduralFireworkSystem {
     this.headVelocityX = 0;
     this.headVelocityY = 0;
     this.collisionCount = 0;
+    this.activeCollisionCount = 0;
   }
 
   spawn(bounds: FireworkHeadBounds | null, viewport: FireworkViewport, mode: 'entry' | 'sustain'): void {
     const side = this.sequence % 2 === 0 ? -1 : 1;
     const isEntry = mode === 'entry';
     this.sequence += 1;
+    const horizontalMargin = Math.min(viewport.width * 0.22, 164);
+    const verticalMargin = Math.min(viewport.height * 0.22, 126);
     const mainX = bounds
-      ? clamp(bounds.cx + side * bounds.rx * 0.92, viewport.width * 0.12, viewport.width * 0.88)
+      ? clamp(bounds.cx + side * bounds.rx * 1.42, horizontalMargin, viewport.width - horizontalMargin)
       : viewport.width * (side < 0 ? 0.38 : 0.62);
     const mainY = bounds
-      ? clamp(bounds.cy - bounds.ry * 1.08, viewport.height * 0.10, viewport.height * 0.34)
+      ? clamp(bounds.cy - bounds.ry * 1.34, verticalMargin, viewport.height * 0.34)
       : viewport.height * 0.24;
 
     const emitBurst = (
       originX: number,
       originY: number,
-      count: number,
+      spokeCount: number,
       scale: number,
       goldShare: number,
       colorOffset: number,
     ): void => {
       const rotationOffset = Math.random() * Math.PI * 2;
-      for (let index = 0; index < count; index += 1) {
-        const progress = index / count;
-        // Stratified angles retain a legible radial explosion, while broader
-        // jitter and continuous speeds remove the synthetic dashed-ring look.
-        const angle = rotationOffset + progress * Math.PI * 2 + (Math.random() - 0.5) * 0.34;
-        const majorSpark = Math.random() > 0.32;
-        // Keep expansion deliberate: the larger spatial scale comes from a
-        // slightly longer flight, not a faster blast that disappears sooner.
-        const speed = (majorSpark
-          ? 188 + Math.pow(Math.random(), 0.62) * 128
-          : 112 + Math.random() * 98) * scale * 0.91;
-        // This radius is the actual bright particle body. It is intentionally
-        // larger instead of faking weight with a thick translucent outline.
-        const radius = (majorSpark ? 1.95 + Math.random() * 1.05 : 1.15 + Math.random() * 0.66) * Math.sqrt(scale);
-        const color = chooseColor(index + this.sequence * 7 + colorOffset, goldShare);
+      const angularStep = Math.PI * 2 / spokeCount;
+      const theme = BURST_THEMES[
+        (this.sequence + (colorOffset > 0 ? 1 : 0)) % BURST_THEMES.length
+      ];
+      let colorIndex = 0;
+
+      const addSpark = (
+        angle: number,
+        speed: number,
+        radius: number,
+        trail: number,
+        life: number,
+        gravity: number,
+        drag: number,
+        startDelay: number,
+        core: boolean,
+      ): void => {
+        const color = core
+          ? '#ffffff'
+          : chooseColor(
+            colorIndex + this.sequence * 7 + colorOffset,
+            goldShare,
+            theme,
+          );
+        colorIndex += 1;
         this.sparks.push({
           x: originX,
           y: originY,
           previousX: originX,
           previousY: originY,
           vx: Math.cos(angle) * speed,
-          vy: Math.sin(angle) * speed - (majorSpark ? 16 : 4) * scale,
+          vy: Math.sin(angle) * speed - 12 * scale,
           radius,
-          trail: (majorSpark ? 28 + Math.random() * 18 : 16 + Math.random() * 12) * Math.sqrt(scale),
-          age: -Math.random() * 0.035,
-          life: majorSpark ? 0.96 + Math.random() * 0.30 : 0.68 + Math.random() * 0.28,
-          gravity: (majorSpark ? 88 + Math.random() * 28 : 98) * scale,
-          drag: majorSpark ? 1.85 : 2.15,
-          curveBias: (Math.random() - 0.5) * 0.09,
+          trail,
+          age: -Math.random() * startDelay,
+          life,
+          gravity,
+          drag,
+          curveBias: (Math.random() - 0.5) * 0.075,
           color,
+          // Glow belongs to the white core only. The colored outer particles
+          // keep a clean single body instead of regaining the rejected shell.
+          glow: core ? (7 + Math.random() * 5) * Math.sqrt(scale) : 0,
+          detailPhase: Math.random() * Math.PI * 2,
           collisionCooldown: 0,
           collisionCount: 0,
           touchingHead: false,
         });
+      };
+
+      for (let index = 0; index < spokeCount; index += 1) {
+        // One evenly-spaced outer spark per sector gives the explosion a clear,
+        // continuous silhouette. The jitter stays well inside a sector so the
+        // body never collapses into random clumps or two disconnected rings.
+        const baseAngle = rotationOffset + index * angularStep;
+        const outerAngle = baseAngle + (Math.random() - 0.5) * angularStep * 0.24;
+        const silhouetteScale = 0.96
+          + Math.sin(index * 2.399963 + rotationOffset) * 0.055;
+        const outerSpeed = (228 + Math.random() * 40) * scale * silhouetteScale;
+        addSpark(
+          outerAngle,
+          outerSpeed,
+          (2.00 + Math.random() * 0.72) * Math.sqrt(scale),
+          (36 + Math.random() * 12) * Math.sqrt(scale),
+          1.20 + Math.random() * 0.22,
+          (80 + Math.random() * 22) * scale,
+          1.48 + Math.random() * 0.14,
+          0.026,
+          false,
+        );
+
+        // A companion on four out of five spokes sits close to the same ray.
+        // Its broad speed range fills the body instead of drawing a second ring.
+        // This builds a cohesive radial
+        // mass like the reference without copying its very high particle count.
+        if ((index + this.sequence) % 5 !== 0) {
+          const direction = index % 2 === 0 ? -1 : 1;
+          const companionAngle = baseAngle
+            + direction * angularStep * (0.20 + Math.random() * 0.13);
+          addSpark(
+            companionAngle,
+            outerSpeed * (0.68 + Math.random() * 0.22),
+            (1.68 + Math.random() * 0.58) * Math.sqrt(scale),
+            (29 + Math.random() * 10) * Math.sqrt(scale),
+            1.10 + Math.random() * 0.20,
+            (85 + Math.random() * 20) * scale,
+            1.58 + Math.random() * 0.16,
+            0.032,
+            false,
+          );
+        }
+
+        // Inner rays cover alternate sectors with deliberately varied speeds,
+        // connecting the flash core to the crown without forming a third ring.
+        if ((index + colorOffset) % 3 !== 0) {
+          const innerAngle = baseAngle + (Math.random() - 0.5) * angularStep * 0.26;
+          addSpark(
+            innerAngle,
+            outerSpeed * (0.25 + Math.random() * 0.30),
+            (1.42 + Math.random() * 0.48) * Math.sqrt(scale),
+            (26 + Math.random() * 11) * Math.sqrt(scale),
+            1.05 + Math.random() * 0.19,
+            (91 + Math.random() * 18) * scale,
+            1.72 + Math.random() * 0.16,
+            0.020,
+            true,
+          );
+        }
       }
       this.flashes.push({
         x: originX,
         y: originY,
         age: 0,
-        life: 0.30,
-        radius: (isEntry ? 36 : 28) * scale,
-        color: goldShare > 0.5
-          ? GOLD_PALETTE[this.sequence % GOLD_PALETTE.length]
-          : PEARL_PALETTE[this.sequence % PEARL_PALETTE.length],
+        life: 0.50,
+        radius: (isEntry ? 32 : 25) * scale,
+        color: '#ffffff',
+        kind: 'burst',
+        nx: 0,
+        ny: -1,
+        strength: 1,
       });
     };
 
-    emitBurst(mainX, mainY, isEntry ? 124 : 88, 1.42, isEntry ? 0.13 : 0.24, 0);
+    emitBurst(mainX, mainY, isEntry ? 44 : 36, 1.30, isEntry ? 0.13 : 0.24, 0);
     if (isEntry) {
       const accentX = bounds
-        ? clamp(bounds.cx - side * bounds.rx * 1.08, viewport.width * 0.10, viewport.width * 0.90)
+        ? clamp(bounds.cx - side * bounds.rx * 1.34, horizontalMargin * 0.78, viewport.width - horizontalMargin * 0.78)
         : viewport.width * (side < 0 ? 0.64 : 0.36);
       const accentY = bounds
-        ? clamp(bounds.cy - bounds.ry * 0.28, viewport.height * 0.18, viewport.height * 0.58)
+        ? clamp(bounds.cy - bounds.ry * 0.52, viewport.height * 0.18, viewport.height * 0.52)
         : viewport.height * 0.42;
-      emitBurst(accentX, accentY, 52, 0.78, 0.72, 41);
+      emitBurst(accentX, accentY, 22, 0.82, 0.72, 41);
     }
     if (this.sparks.length > MAX_SPARKS) this.sparks.splice(0, this.sparks.length - MAX_SPARKS);
     while (this.flashes.length > MAX_FLASHES) this.flashes.shift();
@@ -564,14 +703,16 @@ export class ProceduralFireworkSystem {
       const incomingSpeed = Math.max(0, -normalVelocity);
       const outwardSpeed = Math.max(0, normalVelocity);
       const headPush = Math.max(0, headNormalVelocity);
+      const headSpeed = Math.hypot(this.headVelocityX, this.headVelocityY);
+      const activeHeadImpact = headPush >= 58 || headSpeed >= 120;
       const rebound = clamp(
         Math.max(
-          170,
+          activeHeadImpact ? 225 : 145,
           outwardSpeed * 1.14 + headPush * 0.78,
           incomingSpeed * 0.88 + headPush * 0.92,
         ),
-        170,
-        480,
+        activeHeadImpact ? 225 : 145,
+        activeHeadImpact ? 520 : 330,
       );
       const sideImpulse = headTangentVelocity * 0.42 + (Math.random() - 0.5) * 38;
       // A leading-point hit is placed back on the boundary. For a visible
@@ -592,17 +733,22 @@ export class ProceduralFireworkSystem {
         -0.13,
         0.13,
       );
-      spark.life = Math.max(spark.life, spark.age + 0.42);
+      spark.life = Math.max(spark.life, spark.age + (activeHeadImpact ? 0.54 : 0.38));
       spark.collisionCooldown = 0.14;
       spark.collisionCount += 1;
       this.collisionCount += 1;
+      if (activeHeadImpact) this.activeCollisionCount += 1;
       this.flashes.push({
         x: collision.x,
         y: collision.y,
         age: 0,
-        life: 0.16,
-        radius: 8 + spark.radius * 1.8,
+        life: activeHeadImpact ? 0.19 : 0.12,
+        radius: (activeHeadImpact ? 11 : 6) + spark.radius * 1.7,
         color: spark.color,
+        kind: 'impact',
+        nx: collision.nx,
+        ny: collision.ny,
+        strength: activeHeadImpact ? 1 : 0.55,
       });
       while (this.flashes.length > MAX_FLASHES) this.flashes.shift();
     }
@@ -615,31 +761,86 @@ export class ProceduralFireworkSystem {
       const progress = clamp(flash.age / flash.life, 0, 1);
       const radius = flash.radius * (0.40 + progress * 0.90);
       const gradient = target.createRadialGradient(flash.x, flash.y, 0, flash.x, flash.y, radius);
-      gradient.addColorStop(0, withAlpha(flash.color, 0.92));
-      gradient.addColorStop(0.22, withAlpha(flash.color, 0.34));
+      gradient.addColorStop(0, withAlpha(flash.color, 1));
+      gradient.addColorStop(0.16, withAlpha(flash.color, 0.62));
+      gradient.addColorStop(0.40, withAlpha(flash.color, 0.18));
       gradient.addColorStop(1, 'rgba(255,255,255,0)');
-      target.globalAlpha = (1 - progress) * 0.82;
+      const flashFade = flash.kind === 'burst'
+        ? Math.pow(1 - progress, 0.68)
+        : 1 - progress;
+      target.globalAlpha = flashFade * 0.94 * flash.strength;
       target.fillStyle = gradient;
+      if (flash.kind === 'impact') {
+        const angle = Math.atan2(flash.ny, flash.nx);
+        target.save();
+        target.translate(flash.x, flash.y);
+        target.rotate(angle);
+        target.scale(1.8, 0.68);
+        target.translate(-flash.x, -flash.y);
+      }
       target.beginPath();
       target.arc(flash.x, flash.y, radius, 0, Math.PI * 2);
       target.fill();
+      if (flash.kind === 'impact') target.restore();
     }
 
     for (const spark of this.sparks) {
       if (spark.age < 0) continue;
       const progress = clamp(spark.age / spark.life, 0, 1);
-      const alpha = Math.min(1, spark.age / 0.050) * Math.pow(1 - progress, 0.82);
+      const fadeIn = Math.min(1, spark.age / 0.055);
+      // Hold the useful visible phase longer so a 100-particle burst actually
+      // reads as dense; fading half the particles early made it look like 40.
+      const fadeOut = progress < 0.66
+        ? 1
+        : Math.pow(1 - (progress - 0.66) / 0.34, 0.84);
+      const alpha = fadeIn * fadeOut;
       if (alpha <= 0.015) continue;
       const geometry = sparkTrailGeometry(spark);
+      // Size-over-life gives the burst a compact ignition, a readable full
+      // body, and a restrained exit without changing the collision radius.
+      const bodyScale = 0.82
+        + Math.sin(Math.min(1, progress / 0.78) * Math.PI) * 0.20;
+      const drawRadius = spark.radius * bodyScale;
+
+      // Tiny detached embers add the platform-like granular finish, but they
+      // are computed from the current curve and never become physics objects.
+      target.globalAlpha = alpha;
+      target.fillStyle = spark.color;
+      if (spark.age > 0.09 && progress < 0.84) {
+        drawDerivedAfterglow(
+          target,
+          geometry,
+          drawRadius,
+          spark.detailPhase,
+          alpha,
+        );
+      }
 
       // A single continuous tapered light trail: narrow at the rear and
       // gently wider at the rounded leading end. Do not stack a second body
-      // inside it; that made each spark read as two fish scales instead of one
-      // clean firework particle.
+      // around it; the only additional mark is a small white-hot leading core.
       target.globalAlpha = alpha;
-      target.fillStyle = spark.color;
-      traceTaperedSpark(target, geometry, spark.radius);
+      if (spark.glow > 0) {
+        target.shadowColor = spark.color;
+        target.shadowBlur = spark.glow;
+      }
+      traceTaperedSpark(target, geometry, drawRadius);
       target.fill();
+      if (spark.glow > 0) target.shadowBlur = 0;
+
+      if (spark.glow === 0) {
+        target.globalAlpha = alpha * 0.90;
+        target.fillStyle = '#fffdf4';
+        target.beginPath();
+        target.arc(
+          geometry.headX,
+          geometry.headY,
+          Math.max(0.70, drawRadius * 0.34),
+          0,
+          Math.PI * 2,
+        );
+        target.fill();
+      }
     }
     target.restore();
   }
