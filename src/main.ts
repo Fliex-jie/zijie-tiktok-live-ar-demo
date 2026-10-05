@@ -36,11 +36,15 @@ const SMILE_EXIT = 0.08;
 const SMILE_STRONG_EXIT = 0.17;
 const SMILE_JAW_ENTER_MAX = 0.32;
 const SMILE_JAW_EXIT_MAX = 0.40;
+const FRONTAL_NEUTRAL_SMILE_MAX = 0.13;
+const FRONTAL_NEUTRAL_LIP_PRESS_MIN = 0.085;
 const LAUGH_ENTER_SMILE = 0.34;
 const LAUGH_ENTER_JAW = 0.30;
 const LAUGH_EXIT_SMILE = 0.25;
 const LAUGH_EXIT_JAW = 0.18;
-const LAUGH_SMILE_TO_JAW_RATIO = 0.72;
+const LAUGH_SMILE_TO_JAW_RATIO = 0.80;
+const SIDE_FACE_START_RAD = 0.16;
+const SIDE_FACE_FULL_RAD = 0.56;
 const LIP_PRESS_ENTER = 0.085;
 const CLOSED_LIP_PRESS_ENTER = 0.058;
 const LIP_PRESS_MEMORY_MS = 360;
@@ -114,6 +118,7 @@ interface FeatureSnapshot {
   geometrySmile: number;
   geometryMouthOpen: number;
   mouthWidthRatio: number;
+  faceTurn: number;
   inferenceMs: number;
   lastUpdatedAt: number;
   headBounds: HeadBounds | null;
@@ -307,6 +312,7 @@ let latestFeatures: FeatureSnapshot = {
   geometrySmile: 0,
   geometryMouthOpen: 0,
   mouthWidthRatio: 0,
+  faceTurn: 0,
   inferenceMs: 0,
   lastUpdatedAt: 0,
   headBounds: null,
@@ -372,6 +378,7 @@ function updateHud(): void {
   canvas.dataset.geometrySmile = latestFeatures.geometrySmile.toFixed(3);
   canvas.dataset.mouthWidth = latestFeatures.mouthWidthRatio.toFixed(3);
   canvas.dataset.faceScale = (latestFeatures.headBounds?.scale ?? 0).toFixed(3);
+  canvas.dataset.faceTurn = latestFeatures.faceTurn.toFixed(3);
 }
 
 function updateAudioStatus(message: string, enabled = audioEnabled): void {
@@ -528,6 +535,32 @@ function smoothResponsive(current: number, sample: number, riseWeight = 0.48, fa
   return current + (sample - current) * weight;
 }
 
+function getFaceTurn(result: FaceLandmarkerResult, faceIndex: number, landmarks: FaceLandmarkerResult['faceLandmarks'][number] | null): number {
+  // FaceLandmarker already provides a pose matrix. The absolute yaw is all we
+  // need here: left and right profile views should receive identical handling.
+  // For the usual row- or column-major rotation layout, indices 2 and 10 form
+  // the yaw sine/cosine pair (the sign changes, but its magnitude does not).
+  const matrix = result.facialTransformationMatrixes?.[faceIndex]?.data;
+  if (matrix && matrix.length >= 11 && Number.isFinite(matrix[2]) && Number.isFinite(matrix[10])) {
+    return clamp(Math.abs(Math.atan2(matrix[2], matrix[10])), 0, Math.PI / 2);
+  }
+  if (!landmarks?.[1] || !landmarks[234] || !landmarks[454]) return 0;
+
+  // Safe fallback for implementations that omit the pose matrix. As the head
+  // turns, the nose moves away from the midpoint of the two face sides.
+  const nose = landmarks[1];
+  const leftTemple = landmarks[234];
+  const rightTemple = landmarks[454];
+  const faceSpan = Math.max(0.001, Math.abs(rightTemple.x - leftTemple.x));
+  const faceCenterX = (leftTemple.x + rightTemple.x) / 2;
+  const normalizedOffset = Math.abs(nose.x - faceCenterX) / faceSpan;
+  return clamp(normalizedOffset * 1.35, 0, 1) * (Math.PI / 2);
+}
+
+function getSideFaceWeight(faceTurn: number): number {
+  return clamp((faceTurn - SIDE_FACE_START_RAD) / (SIDE_FACE_FULL_RAD - SIDE_FACE_START_RAD), 0, 1);
+}
+
 function mapLandmarkToStage(
   point: FaceLandmarkerResult['faceLandmarks'][number][number],
   rect: DOMRect,
@@ -672,6 +705,8 @@ function readFeatures(result: FaceLandmarkerResult, inferenceMs: number, rect: D
   const mouthGeometry = landmarks ? getMouthGeometry(landmarks) : { smile: 0, open: 0, width: 0 };
   const headBounds = landmarks ? getHeadBounds(landmarks, rect) : null;
   const isDistantFace = Boolean(headBounds && headBounds.scale < DISTANT_FACE_SCALE);
+  const faceTurn = getFaceTurn(result, faceIndex, landmarks);
+  const sideFaceWeight = getSideFaceWeight(faceTurn);
 
   // On a small face the dedicated mouthSmile blendshape often collapses
   // toward zero. mouthDimple survives at lower pixel density more reliably,
@@ -682,9 +717,17 @@ function readFeatures(result: FaceLandmarkerResult, inferenceMs: number, rect: D
   // the user's head is tilted and just one mouth corner appears raised.
   const bilateralSmile = smileScore * 0.68 + symmetricSmile * 0.32;
   const bilateralDimple = mouthDimple * 0.68 + symmetricDimple * 0.32;
+  // A profile view hides one mouth corner, so the weaker-side weighting that
+  // protects a frontal face from smirk false positives becomes destructive.
+  // Blend toward the visible/stronger side only in proportion to measured yaw;
+  // frontal thresholds therefore remain unchanged.
+  const profileSmile = Math.max(leftSmile, rightSmile) * 0.68 + smileScore * 0.32;
+  const profileDimple = Math.max(leftDimple, rightDimple) * 0.68 + mouthDimple * 0.32;
+  const poseAdjustedSmile = bilateralSmile + Math.max(0, profileSmile - bilateralSmile) * sideFaceWeight;
+  const poseAdjustedDimple = bilateralDimple + Math.max(0, profileDimple - bilateralDimple) * sideFaceWeight;
   const smileEvidence = isDistantFace
-    ? Math.max(bilateralSmile, bilateralDimple * 0.82)
-    : bilateralSmile;
+    ? Math.max(poseAdjustedSmile, poseAdjustedDimple * 0.82)
+    : poseAdjustedSmile;
 
   // Expressions in a live room can change quickly. Rise faster than we fall:
   // entering a stronger expression feels immediate, while the slower release
@@ -702,6 +745,7 @@ function readFeatures(result: FaceLandmarkerResult, inferenceMs: number, rect: D
     geometrySmile: mouthGeometry.smile,
     geometryMouthOpen: mouthGeometry.open,
     mouthWidthRatio: mouthGeometry.width,
+    faceTurn,
     inferenceMs,
     lastUpdatedAt: performance.now(),
     headBounds,
@@ -714,17 +758,33 @@ function isLipPressing(now: number): boolean {
   // smile widens/lifts the mouth, while a press stays narrow and closed.
   const faceScale = latestFeatures.headBounds?.scale ?? 1;
   const isDistantFace = faceScale < DISTANT_FACE_SCALE;
-  const pressEnter = isDistantFace ? LIP_PRESS_ENTER - 0.015 : LIP_PRESS_ENTER;
-  const geometryConfirmsSmile = latestFeatures.geometrySmile >= (isDistantFace ? 0.050 : 0.075) &&
-    latestFeatures.mouthWidthRatio >= (isDistantFace ? 0.355 : 0.385);
-  const geometrySuggestsSmile = latestFeatures.geometrySmile >= (isDistantFace ? 0.025 : 0.035) &&
-    latestFeatures.mouthWidthRatio >= (isDistantFace ? 0.335 : 0.36);
-  const pressDominates = smoothedLipPress >= smoothedSmile * (isDistantFace ? 0.76 : 0.82);
+  const sideFaceWeight = getSideFaceWeight(latestFeatures.faceTurn);
+  const widthRelaxation = sideFaceWeight * 0.060;
+  const geometryRelaxation = 1 - sideFaceWeight * 0.54;
+  const pressEnter = (isDistantFace ? LIP_PRESS_ENTER - 0.015 : LIP_PRESS_ENTER) + sideFaceWeight * 0.055;
+  const geometryConfirmsSmile = latestFeatures.geometrySmile >= (isDistantFace ? 0.050 : 0.075) * geometryRelaxation &&
+    latestFeatures.mouthWidthRatio >= (isDistantFace ? 0.355 : 0.385) - widthRelaxation;
+  const geometrySuggestsSmile = latestFeatures.geometrySmile >= (isDistantFace ? 0.025 : 0.035) * geometryRelaxation &&
+    latestFeatures.mouthWidthRatio >= (isDistantFace ? 0.335 : 0.36) - widthRelaxation;
+  const pressDominates = smoothedLipPress >= smoothedSmile * ((isDistantFace ? 0.76 : 0.82) + sideFaceWeight * 0.40);
+  const profileSmileFloor = Math.max(
+    0.09,
+    (isDistantFace ? 0.105 : 0.120) - sideFaceWeight * 0.025,
+  );
+  // With a turned head MediaPipe frequently labels the compressed/hidden lip
+  // as mouthPress. A visible-side smile plus lifted, sufficiently wide geometry
+  // is stronger evidence than that pose-induced press score.
+  const profileSmileOverridesPress = sideFaceWeight >= 0.24 &&
+    smoothedSmile >= profileSmileFloor &&
+    smoothedJaw <= 0.12 &&
+    smoothedLipPress <= 0.29 &&
+    geometrySuggestsSmile;
+  if (profileSmileOverridesPress) return false;
   const closedNarrowMismatch = !geometrySuggestsSmile &&
     latestFeatures.geometrySmile < 0.045 &&
     latestFeatures.geometryMouthOpen < 0.035 &&
-    latestFeatures.mouthWidthRatio < (isDistantFace ? 0.34 : 0.365) &&
-    smoothedLipPress >= (isDistantFace ? 0.045 : 0.055) &&
+    latestFeatures.mouthWidthRatio < (isDistantFace ? 0.34 : 0.365) - widthRelaxation &&
+    smoothedLipPress >= (isDistantFace ? 0.045 : 0.055) + sideFaceWeight * 0.045 &&
     smoothedSmile < 0.44;
   // At close range the blendshape classifier is more reliable than the
   // corner-lift geometry fallback. A closed mouth with almost zero model
@@ -733,13 +793,13 @@ function isLipPressing(now: number): boolean {
   // user's screenshot (smile 0.00, jaw 0.00, lip press 0.09).
   const directClosedPress = smoothedJaw <= 0.085 &&
     smoothedLipPress >= (isDistantFace ? 0.050 : CLOSED_LIP_PRESS_ENTER) &&
-    smoothedSmile <= (isDistantFace ? 0.16 : 0.12) &&
+    smoothedSmile <= (isDistantFace ? 0.16 : 0.12) - sideFaceWeight * 0.025 &&
     !geometryConfirmsSmile;
   // MediaPipe can report a pursed expression as both mouthSmile and
   // mouthPress. Treat it as a hard veto only when the geometry still looks
   // narrow; a widened closed-mouth smile must remain eligible for rain.
   const hardClosedPress = smoothedJaw <= 0.055 &&
-    smoothedLipPress >= 0.095 &&
+    smoothedLipPress >= 0.095 + sideFaceWeight * 0.055 &&
     !geometrySuggestsSmile &&
     (smoothedSmile <= 0.16 || pressDominates);
   const hasStrongEvidence = (
@@ -758,18 +818,28 @@ function hasLaughEvidence(now: number): boolean {
   const faceSupport = Math.max(smoothedCheekSquint, smoothedEyeSquint);
   const smileJawBalanced = smoothedSmile >= smoothedJaw * LAUGH_SMILE_TO_JAW_RATIO;
   const audioSupport = hasAudioLaughSupport(now);
+  // A yawn or a deliberately opened mouth can still raise mouthSmile because
+  // its corners stretch. Every purely visual laugh path must retain a plausible
+  // smile-to-jaw ratio; strong cheek/eye expression can rescue a real wide-open
+  // laugh, but a neutral-eyed open mouth cannot trigger fireworks.
+  const strongExpressiveOverride = smoothedSmile >= 0.62 && faceSupport >= 0.035;
+  const hasVisualLaughShape = smileJawBalanced || strongExpressiveOverride;
   const standardVisualLaugh = smoothedSmile >= LAUGH_ENTER_SMILE &&
     smoothedJaw >= LAUGH_ENTER_JAW &&
     smileJawBalanced &&
     (faceSupport >= 0.02 || smoothedSmile >= 0.48);
-  const broadOpenSmile = smoothedSmile >= 0.50 && smoothedJaw >= 0.18;
+  const broadOpenSmile = hasVisualLaughShape && smoothedSmile >= 0.50 && smoothedJaw >= 0.18;
   const geometryVisualLaugh = latestFeatures.geometryMouthOpen >= GEOMETRY_LAUGH_OPEN_ENTER &&
+    hasVisualLaughShape &&
     smoothedSmile >= 0.26 &&
     (latestFeatures.geometrySmile >= 0.045 || faceSupport >= 0.018);
   const expressiveVisualLaugh = smoothedSmile >= 0.66 &&
+    hasVisualLaughShape &&
     (smoothedJaw >= 0.08 || latestFeatures.geometryMouthOpen >= 0.045) &&
     faceSupport >= 0.025;
+  const audioLaughShape = smoothedSmile >= smoothedJaw * 0.60 || strongExpressiveOverride;
   const audioAssistedLaugh = audioSupport &&
+    audioLaughShape &&
     smoothedSmile >= 0.46 &&
     (smoothedJaw >= 0.07 || latestFeatures.geometryMouthOpen >= 0.04);
   return standardVisualLaugh || broadOpenSmile || geometryVisualLaugh || expressiveVisualLaugh || audioAssistedLaugh;
@@ -779,24 +849,41 @@ function hasIntentionalSmileEvidence(entering: boolean): boolean {
   const isDistantFace = Boolean(
     latestFeatures.headBounds && latestFeatures.headBounds.scale < DISTANT_FACE_SCALE,
   );
-  const smileThreshold = isDistantFace
+  const sideFaceWeight = getSideFaceWeight(latestFeatures.faceTurn);
+  const baseSmileThreshold = isDistantFace
     ? entering ? DISTANT_SMILE_ENTER : DISTANT_SMILE_EXIT
     : entering ? SMILE_ENTER : SMILE_EXIT;
+  // The visible-side score still settles around 0.12–0.14 in a real profile
+  // smile. Lower only this pose-qualified threshold; the geometry checks below
+  // remain mandatory, so a neutral or pursed profile cannot pass on score alone.
+  const smileThreshold = Math.max(
+    entering ? 0.075 : 0.045,
+    baseSmileThreshold - sideFaceWeight * (entering ? 0.055 : 0.035),
+  );
   const strongThreshold = isDistantFace
     ? entering ? DISTANT_SMILE_STRONG_ENTER : DISTANT_SMILE_STRONG_EXIT
     : entering ? SMILE_STRONG_ENTER : SMILE_STRONG_EXIT;
-  const geometryThreshold = isDistantFace
+  const baseGeometryThreshold = isDistantFace
     ? entering ? DISTANT_GEOMETRY_SMILE_ENTER : DISTANT_GEOMETRY_SMILE_EXIT
     : entering ? GEOMETRY_SMILE_ENTER : GEOMETRY_SMILE_EXIT;
-  const widthThreshold = isDistantFace
+  const baseWidthThreshold = isDistantFace
     ? entering ? DISTANT_SMILE_WIDTH_ENTER : DISTANT_SMILE_WIDTH_EXIT
     : entering ? SMILE_WIDTH_ENTER : SMILE_WIDTH_EXIT;
+  // Mouth width and the hidden corner's lift shrink under perspective. Apply a
+  // bounded correction from measured yaw rather than weakening the frontal and
+  // distant-face rules globally.
+  const geometryThreshold = baseGeometryThreshold * (1 - sideFaceWeight * 0.54);
+  const widthThreshold = baseWidthThreshold - sideFaceWeight * 0.060;
+  const profileSmileThreshold = Math.max(
+    entering ? 0.095 : 0.055,
+    (isDistantFace ? entering ? 0.105 : 0.065 : entering ? 0.120 : 0.070) - sideFaceWeight * 0.025,
+  );
 
   // Even a high classifier value needs a weak independent geometry check.
   // Borderline values need the stricter three-way agreement. This removes the
   // last single-signal path that could turn a head tilt or smirk into rain.
   const strongModelSignal = smoothedSmile >= strongThreshold &&
-    smoothedLipPress <= (isDistantFace ? 0.10 : 0.08) &&
+    smoothedLipPress <= (isDistantFace ? 0.10 : 0.08) + sideFaceWeight * 0.15 &&
     latestFeatures.geometrySmile >= geometryThreshold * 0.34 &&
     latestFeatures.mouthWidthRatio >= widthThreshold - 0.035;
   // A genuine closed-mouth smile can legitimately raise mouthPress a little
@@ -805,17 +892,35 @@ function hasIntentionalSmileEvidence(entering: boolean): boolean {
   // narrow and will fail this branch.
   const closedSmileSignal = smoothedSmile >= smileThreshold &&
     smoothedJaw <= 0.09 &&
-    smoothedLipPress <= (isDistantFace ? 0.15 : 0.14) &&
+    smoothedLipPress <= (isDistantFace ? 0.15 : 0.14) + sideFaceWeight * 0.13 &&
     latestFeatures.geometrySmile >= geometryThreshold * 0.48 &&
     latestFeatures.mouthWidthRatio >= widthThreshold - 0.025;
   const corroboratedSignal = smoothedSmile >= smileThreshold &&
     latestFeatures.geometrySmile >= geometryThreshold &&
     latestFeatures.mouthWidthRatio >= widthThreshold;
-  return strongModelSignal || closedSmileSignal || corroboratedSignal;
+  const profileSmileSignal = sideFaceWeight >= 0.24 &&
+    smoothedSmile >= profileSmileThreshold &&
+    smoothedJaw <= 0.11 &&
+    smoothedLipPress <= 0.29 &&
+    latestFeatures.geometrySmile >= geometryThreshold * 0.56 &&
+    latestFeatures.mouthWidthRatio >= widthThreshold - 0.012;
+  return strongModelSignal || closedSmileSignal || corroboratedSignal || profileSmileSignal;
 }
 
 function desiredInteractionState(now: number): InteractionState {
   if (!latestFeatures.faceDetected) return 'IDLE';
+  const sideFaceWeight = getSideFaceWeight(latestFeatures.faceTurn);
+  // After a valid profile smile, returning to a neutral frontal face can leave
+  // the smoothed score around 0.11 for several frames. That is below the entry
+  // threshold but used to satisfy the looser exit hysteresis, keeping rain on.
+  // Release it immediately only for a frontal, closed, lip-compressed mouth;
+  // the profile-specific 0.12–0.14 smile path remains unaffected.
+  const returnedToFrontalNeutral = interactionState === 'SMILE' &&
+    sideFaceWeight < 0.24 &&
+    smoothedSmile < FRONTAL_NEUTRAL_SMILE_MAX &&
+    smoothedJaw <= 0.09 &&
+    smoothedLipPress >= FRONTAL_NEUTRAL_LIP_PRESS_MIN;
+  if (returnedToFrontalNeutral) return 'IDLE';
   // A closed, compressed mouth must never leak into SMILE. MediaPipe often
   // raises mouthSmile at the same time as mouthPress for a pout, so this veto
   // deliberately runs before every positive expression branch.
@@ -827,10 +932,10 @@ function desiredInteractionState(now: number): InteractionState {
     if (now - stateEnteredAt < LAUGH_MIN_DWELL_MS) return 'LAUGH';
     const faceSupport = Math.max(smoothedCheekSquint, smoothedEyeSquint);
     const audioSupport = hasAudioLaughSupport(now);
-    const smileJawBalanced = smoothedSmile >= smoothedJaw * 0.72;
+    const smileJawBalanced = smoothedSmile >= smoothedJaw * LAUGH_SMILE_TO_JAW_RATIO;
     const exitSupport = (faceSupport >= 0.03 && smileJawBalanced) || audioSupport;
     const strongMouthFallback = !audioEnabled && smoothedSmile >= 0.44 && smoothedJaw >= LAUGH_ENTER_JAW && smileJawBalanced;
-    const expressiveExit = smoothedSmile >= 0.48 &&
+    const expressiveExit = smileJawBalanced && smoothedSmile >= 0.48 &&
       (smoothedJaw >= 0.08 || latestFeatures.geometryMouthOpen >= GEOMETRY_LAUGH_OPEN_EXIT) &&
       (faceSupport >= 0.025 || audioSupport);
     const standardExit = smoothedSmile >= LAUGH_EXIT_SMILE &&
@@ -899,6 +1004,7 @@ function transitionInteraction(next: InteractionState, now: number): void {
     smile: smoothedSmile.toFixed(2),
     jaw: smoothedJaw.toFixed(2),
     lipPress: smoothedLipPress.toFixed(2),
+    faceTurnDegrees: (latestFeatures.faceTurn * 180 / Math.PI).toFixed(1),
   });
 }
 
@@ -1809,6 +1915,7 @@ function resetExperience(): void {
     geometrySmile: 0,
     geometryMouthOpen: 0,
     mouthWidthRatio: 0,
+    faceTurn: 0,
     inferenceMs: 0,
     lastUpdatedAt: 0,
     headBounds: null,
