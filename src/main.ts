@@ -215,12 +215,12 @@ app.innerHTML = `
           <section class="sidebar-section sources-section">
             <div class="sidebar-heading"><h2>来源</h2><button type="button" aria-label="新增来源">＋</button></div>
             <button class="source-item active" type="button">
-              <span class="source-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 10.5 20 8v8l-5-2.5v-3Z"/><rect x="3" y="6" width="12" height="12" rx="3"/></svg></span>
+              <span class="source-icon camera-source"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 10.5 20 8v8l-5-2.5v-3Z"/><rect x="3" y="6" width="12" height="12" rx="3"/></svg></span>
               <span><strong>摄像头</strong><small>FaceTime HD Camera</small></span>
               <svg class="eye-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/></svg>
             </button>
             <button class="source-item" type="button">
-              <span class="source-icon effect-source"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 1.2 5.4L18 4.5l-2.8 4.8L21 10l-5.5 1.7 4 4-5.2-2.3L14 19l-2-5-2 5-.3-5.6-5.2 2.3 4-4L3 10l5.8-.7L6 4.5l4.8 2.9L12 2Z"/></svg></span>
+              <span class="source-icon effect-source"><img src="/assets/badge-ar.svg" alt="" width="20" height="20" /></span>
               <span><strong>AR 特效</strong><small>表情驱动 · 已启用</small></span>
               <svg class="eye-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/></svg>
             </button>
@@ -1552,7 +1552,7 @@ function updateEffectMix(deltaSeconds: number): void {
   // remain in front for depth and responsiveness. Opacity follows the same
   // eased mix, so a short classification spike cannot hard-flash the video.
   stageWrap.style.setProperty('--rain-grade-opacity', (smileEffectMix * 0.06).toFixed(3));
-  stageWrap.style.setProperty('--rain-footage-opacity', (smileEffectMix * 0.54).toFixed(3));
+  stageWrap.style.setProperty('--rain-footage-opacity', (smileEffectMix * 0.58).toFixed(3));
   const shouldPlay = uiState === 'running' && interactionState === 'SMILE';
   if (shouldPlay && !rainFootagePlaying) {
     rainFootagePlaying = true;
@@ -1603,8 +1603,8 @@ function drawStageAtmosphere(rect: DOMRect): void {
 
   if (smileEffectMix > 0.01) {
     const rainGlow = ctx.createLinearGradient(0, 0, 0, rect.height);
-    rainGlow.addColorStop(0, `rgba(50, 196, 255, ${0.16 * smileEffectMix})`);
-    rainGlow.addColorStop(0.52, `rgba(31, 107, 207, ${0.04 * smileEffectMix})`);
+    rainGlow.addColorStop(0, `rgba(50, 196, 255, ${0.1 * smileEffectMix})`);
+    rainGlow.addColorStop(0.52, `rgba(31, 107, 207, ${0.025 * smileEffectMix})`);
     rainGlow.addColorStop(1, 'rgba(4, 16, 45, 0)');
     ctx.save();
     ctx.globalCompositeOperation = 'screen';

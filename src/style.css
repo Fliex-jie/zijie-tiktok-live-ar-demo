@@ -86,8 +86,10 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--cyan); outline-
 .scene-item small, .source-item small { overflow: hidden; color: #898d98; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .scene-item em { color: #6e727d; font-size: 11px; font-style: normal; letter-spacing: .08em; }
 .source-icon { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 7px; color: #b6bac5; background: rgba(255,255,255,.055); }
-.source-icon.effect-source { color: #c1b2ff; background: rgba(151,124,255,.1); }
+.source-icon.effect-source { color: #b6bac5; background: rgba(255,255,255,.055); }
 .source-icon svg, .eye-icon { width: 14px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
+.source-icon.camera-source svg, .source-icon.effect-source img { width: 19px; height: 19px; }
+.source-icon.effect-source img { display: block; opacity: .82; filter: invert(72%); }
 .eye-icon { width: 13px; color: #777b86; }
 .sidebar-footer { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: auto; padding: 11px; border-top: 1px solid var(--line); }
 .sidebar-footer button { min-height: 40px; border: 1px solid var(--line); border-radius: 9px; color: #e1e2e6; background: rgba(255,255,255,.025); font-size: 12px; font-weight: 680; cursor: pointer; }

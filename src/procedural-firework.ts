@@ -31,6 +31,7 @@ type Spark = {
   collisionCooldown: number;
   collisionCount: number;
   touchingHead: boolean;
+  interactive: boolean;
 };
 
 type BurstFlash = {
@@ -371,6 +372,7 @@ export class ProceduralFireworkSystem {
   private sparks: Spark[] = [];
   private flashes: BurstFlash[] = [];
   private sequence = 0;
+  private activeSide: -1 | 1 = -1;
   private previousHeadCenter: { x: number; y: number } | null = null;
   private previousCollisionBounds: FireworkHeadBounds | null = null;
   private headSampleAge = 0;
@@ -391,6 +393,7 @@ export class ProceduralFireworkSystem {
     this.headSampleAge = 0;
     this.headVelocityX = 0;
     this.headVelocityY = 0;
+    this.activeSide = -1;
     this.collisionCount = 0;
     this.activeCollisionCount = 0;
   }
@@ -398,6 +401,18 @@ export class ProceduralFireworkSystem {
   spawn(bounds: FireworkHeadBounds | null, viewport: FireworkViewport, mode: 'entry' | 'sustain'): void {
     const side = this.sequence % 2 === 0 ? -1 : 1;
     const isEntry = mode === 'entry';
+    if (isEntry) {
+      if (bounds) {
+        const leftSpace = bounds.cx - bounds.rx;
+        const rightSpace = viewport.width - bounds.cx - bounds.rx;
+        const meaningfulDifference = viewport.width * 0.06;
+        this.activeSide = Math.abs(rightSpace - leftSpace) >= meaningfulDifference
+          ? rightSpace > leftSpace ? 1 : -1
+          : this.activeSide === -1 ? 1 : -1;
+      } else {
+        this.activeSide = this.activeSide === -1 ? 1 : -1;
+      }
+    }
     this.sequence += 1;
     const horizontalMargin = Math.min(viewport.width * 0.22, 164);
     const verticalMargin = Math.min(viewport.height * 0.22, 126);
@@ -415,6 +430,7 @@ export class ProceduralFireworkSystem {
       scale: number,
       goldShare: number,
       colorOffset: number,
+      interactive = true,
     ): void => {
       const rotationOffset = Math.random() * Math.PI * 2;
       const angularStep = Math.PI * 2 / spokeCount;
@@ -464,6 +480,7 @@ export class ProceduralFireworkSystem {
           collisionCooldown: 0,
           collisionCount: 0,
           touchingHead: false,
+          interactive,
         });
       };
 
@@ -540,6 +557,8 @@ export class ProceduralFireworkSystem {
       });
     };
 
+    // Preserve the approved two-burst composition exactly. Collision is
+    // handled separately and only activates on deliberate head movement.
     emitBurst(mainX, mainY, isEntry ? 44 : 36, 1.30, isEntry ? 0.13 : 0.24, 0);
     if (isEntry) {
       const accentX = bounds
@@ -549,6 +568,26 @@ export class ProceduralFireworkSystem {
         ? clamp(bounds.cy - bounds.ry * 0.52, viewport.height * 0.18, viewport.height * 0.52)
         : viewport.height * 0.42;
       emitBurst(accentX, accentY, 22, 0.82, 0.72, 41);
+
+      // Add one smaller interactive satellite on the roomier side without
+      // replacing either approved burst. Its resting gap means the viewer has
+      // to move the head toward it before any physical response is possible.
+      const satelliteSide = this.activeSide;
+      const satelliteReach = clamp(viewport.height * 0.18, 70, 102);
+      const satelliteOffset = bounds
+        ? bounds.rx + satelliteReach + Math.max(14, bounds.rx * 0.14)
+        : viewport.width * 0.24;
+      const satelliteX = bounds
+        ? clamp(
+          bounds.cx + satelliteSide * satelliteOffset,
+          satelliteReach * 0.82,
+          viewport.width - satelliteReach * 0.82,
+        )
+        : viewport.width * (satelliteSide < 0 ? 0.25 : 0.75);
+      const satelliteY = bounds
+        ? clamp(bounds.cy + bounds.ry * 0.08, viewport.height * 0.24, viewport.height * 0.68)
+        : viewport.height * 0.48;
+      emitBurst(satelliteX, satelliteY, 16, 0.70, 0.42, 73, true);
     }
     if (this.sparks.length > MAX_SPARKS) this.sparks.splice(0, this.sparks.length - MAX_SPARKS);
     while (this.flashes.length > MAX_FLASHES) this.flashes.shift();
@@ -673,7 +712,7 @@ export class ProceduralFireworkSystem {
       spark.x += spark.vx * deltaSeconds;
       spark.y += spark.vy * deltaSeconds;
 
-      if (collisionBounds.length === 0) {
+      if (!spark.interactive || collisionBounds.length === 0) {
         spark.touchingHead = false;
         continue;
       }
@@ -704,15 +743,24 @@ export class ProceduralFireworkSystem {
       const outwardSpeed = Math.max(0, normalVelocity);
       const headPush = Math.max(0, headNormalVelocity);
       const headSpeed = Math.hypot(this.headVelocityX, this.headVelocityY);
-      const activeHeadImpact = headPush >= 58 || headSpeed >= 120;
+      // A spark entering a resting head is allowed to finish its visual path.
+      // Reflection only happens when the viewer deliberately moves the head
+      // toward the contact normal, so collisions read as user agency rather
+      // than two automatic explosions bouncing off both sides of the face.
+      const activeHeadImpact = headPush >= 44 && headSpeed >= 70;
+      if (!activeHeadImpact) {
+        spark.touchingHead = false;
+        continue;
+      }
+      spark.touchingHead = true;
       const rebound = clamp(
         Math.max(
-          activeHeadImpact ? 225 : 145,
+          225,
           outwardSpeed * 1.14 + headPush * 0.78,
           incomingSpeed * 0.88 + headPush * 0.92,
         ),
-        activeHeadImpact ? 225 : 145,
-        activeHeadImpact ? 520 : 330,
+        225,
+        520,
       );
       const sideImpulse = headTangentVelocity * 0.42 + (Math.random() - 0.5) * 38;
       // A leading-point hit is placed back on the boundary. For a visible
@@ -733,22 +781,22 @@ export class ProceduralFireworkSystem {
         -0.13,
         0.13,
       );
-      spark.life = Math.max(spark.life, spark.age + (activeHeadImpact ? 0.54 : 0.38));
+      spark.life = Math.max(spark.life, spark.age + 0.54);
       spark.collisionCooldown = 0.14;
       spark.collisionCount += 1;
       this.collisionCount += 1;
-      if (activeHeadImpact) this.activeCollisionCount += 1;
+      this.activeCollisionCount += 1;
       this.flashes.push({
         x: collision.x,
         y: collision.y,
         age: 0,
-        life: activeHeadImpact ? 0.19 : 0.12,
-        radius: (activeHeadImpact ? 11 : 6) + spark.radius * 1.7,
+        life: 0.19,
+        radius: 11 + spark.radius * 1.7,
         color: spark.color,
         kind: 'impact',
         nx: collision.nx,
         ny: collision.ny,
-        strength: activeHeadImpact ? 1 : 0.55,
+        strength: 1,
       });
       while (this.flashes.length > MAX_FLASHES) this.flashes.shift();
     }
