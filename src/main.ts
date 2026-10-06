@@ -2,7 +2,7 @@ import './style.css';
 import { FaceLandmarker, FilesetResolver, type FaceLandmarkerResult } from '@mediapipe/tasks-vision';
 import { ProceduralFireworkSystem } from './procedural-firework';
 
-const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+const MODEL_URL = '/assets/face_landmarker.task';
 const WASM_ROOT = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm';
 const INFERENCE_INTERVAL_MS = 1000 / 10;
 const RENDER_INTERVAL_MS = 1000 / 60;
@@ -292,6 +292,7 @@ const rainFrameSampler = document.createElement('canvas');
 const rainFrameSamplerContext = rainFrameSampler.getContext('2d');
 
 let faceLandmarker: FaceLandmarker | null = null;
+let faceLandmarkerLoadPromise: Promise<FaceLandmarker> | null = null;
 let stream: MediaStream | null = null;
 let audioStream: MediaStream | null = null;
 let audioContext: AudioContext | null = null;
@@ -1584,10 +1585,21 @@ async function createLandmarker(): Promise<FaceLandmarker> {
   });
 }
 
+function loadFaceLandmarker(): Promise<FaceLandmarker> {
+  if (!faceLandmarkerLoadPromise) {
+    faceLandmarkerLoadPromise = createLandmarker().catch((error) => {
+      faceLandmarkerLoadPromise = null;
+      throw error;
+    });
+  }
+  return faceLandmarkerLoadPromise;
+}
+
 async function startExperience(): Promise<void> {
   if (uiState === 'loading' || uiState === 'running') return;
   setUiState('loading', '正在请求摄像头权限并加载 Face Landmarker…');
   startButton.disabled = true;
+  const landmarkerPromise = loadFaceLandmarker();
 
   try {
     cameraQualityIndex = chooseInitialCameraQuality();
@@ -1602,7 +1614,9 @@ async function startExperience(): Promise<void> {
     cameraPoorPerformanceWindows = 0;
     updateCameraDiagnostics(initialCameraProfile);
     resizeCanvas();
-    faceLandmarker = await createLandmarker();
+    stageMessage.querySelector('strong')!.textContent = '摄像头已开启';
+    stageMessage.querySelector('span')!.textContent = '正在初始化人脸识别，首次打开可能需要几秒钟…';
+    faceLandmarker = await landmarkerPromise;
     stageMessage.classList.add('hidden');
     resetButton.disabled = false;
     audioButton.disabled = false;
@@ -1628,6 +1642,7 @@ function resetExperience(): void {
   video.srcObject = null;
   faceLandmarker?.close();
   faceLandmarker = null;
+  faceLandmarkerLoadPromise = null;
   latestLandmarks = null;
   particles.length = 0;
   rainRipples.length = 0;
@@ -1689,6 +1704,10 @@ function resetExperience(): void {
   audioButton.disabled = true;
   setUiState('idle', '技术验证目标：确认表情状态可以稳定驱动不同效果。');
 }
+
+void loadFaceLandmarker().catch((error) => {
+  console.warn('Face Landmarker preload failed; it will retry when the experience starts.', error);
+});
 
 startButton.addEventListener('click', () => void startExperience());
 resetButton.addEventListener('click', resetExperience);
