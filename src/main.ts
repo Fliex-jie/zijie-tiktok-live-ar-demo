@@ -1,13 +1,5 @@
 import './style.css';
 import { FaceLandmarker, FilesetResolver, type FaceLandmarkerResult } from '@mediapipe/tasks-vision';
-import {
-  drawAuthoredPhysicalGroup,
-  groupCompositionPosition,
-  renderAuthoredCore,
-  type AuthoredFirework,
-  type AuthoredGroup,
-  type AuthoredLayer,
-} from './authored-firework';
 import { ProceduralFireworkSystem } from './procedural-firework';
 
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
@@ -69,8 +61,6 @@ const FIREWORK_REPEAT_MS = 1320;
 const RAIN_DROP_RATE = 18;
 const RAIN_SPLASH_RATE = 6.5;
 const MAX_PARTICLES = 180;
-const MAX_FIREWORK_BURSTS = 1;
-const MAX_COLLISION_FLASHES = 12;
 const MAX_RAIN_RIPPLES = 22;
 const MAX_TRACKED_FACES = 2;
 const DISTANT_FACE_SCALE = 0.38;
@@ -88,8 +78,6 @@ const DISTANT_SMILE_WIDTH_ENTER = 0.355;
 const DISTANT_SMILE_WIDTH_EXIT = 0.34;
 const GEOMETRY_LAUGH_OPEN_ENTER = 0.058;
 const GEOMETRY_LAUGH_OPEN_EXIT = 0.042;
-const AUTHORED_FIREWORK_CACHE_SIZE = 360;
-const AUTHORED_FIREWORK_DURATION = 1.62;
 
 type UiState = 'idle' | 'loading' | 'running' | 'error';
 type InteractionState = 'IDLE' | 'SMILE' | 'OPEN_MOUTH' | 'LAUGH';
@@ -139,15 +127,6 @@ interface Particle {
   prevY?: number;
 }
 
-interface CollisionFlash {
-  x: number;
-  y: number;
-  radius: number;
-  life: number;
-  maxLife: number;
-  hue: number;
-}
-
 interface RainRipple {
   x: number;
   y: number;
@@ -156,32 +135,6 @@ interface RainRipple {
   life: number;
   maxLife: number;
   alpha: number;
-}
-
-interface FireworkBurst {
-  x: number;
-  y: number;
-  size: number;
-  rotation: number;
-  life: number;
-  maxLife: number;
-  alpha: number;
-  coreCanvas: HTMLCanvasElement;
-  lastCoreFrame: number;
-  physicalParticles: AuthoredParticleState[];
-}
-
-interface AuthoredParticleState {
-  layer: AuthoredLayer;
-  group: AuthoredGroup;
-  previousAuthoredX: number | null;
-  previousAuthoredY: number | null;
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  rotation: number;
-  collided: boolean;
 }
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -358,19 +311,11 @@ let lastVisualFrameAt = -Infinity;
 let rainAccumulator = 0;
 let splashAccumulator = 0;
 const particles: Particle[] = [];
-const collisionFlashes: CollisionFlash[] = [];
 const rainRipples: RainRipple[] = [];
-const fireworkBursts: FireworkBurst[] = [];
 let smileEffectMix = 0;
 let laughEffectMix = 0;
 let rainFootagePlaying = false;
 let previewInitialized = false;
-let fireworkSequence = 0;
-let previewCollisionHits = 0;
-let authoredFirework: AuthoredFirework | null = null;
-// Kept only as a dormant compatibility path while the new procedural effect
-// is evaluated. The JSON is no longer fetched or rendered at runtime.
-const authoredFireworkReady: Promise<AuthoredFirework | null> = Promise.resolve(null);
 const proceduralFireworks = new ProceduralFireworkSystem();
 
 function setUiState(next: UiState, message?: string): void {
@@ -586,10 +531,6 @@ function disableAudioAssist(): void {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
-}
-
-function pseudoRandom(seed: number): number {
-  return Math.abs(Math.sin(seed) * 10000) % 1;
 }
 
 function getBlendshapeScore(result: FaceLandmarkerResult, name: string, faceIndex = 0): number {
@@ -1188,84 +1129,6 @@ function spawnRainSplash(width: number, height: number): void {
   }
 }
 
-function pushFireworkBurst(burst: FireworkBurst): void {
-  if (fireworkBursts.length >= MAX_FIREWORK_BURSTS) fireworkBursts.shift();
-  fireworkBursts.push(burst);
-}
-
-function headLocalToStage(bounds: HeadBounds, localX: number, localY: number): { x: number; y: number } {
-  const cosine = Math.cos(bounds.angle);
-  const sine = Math.sin(bounds.angle);
-  return {
-    x: bounds.cx + localX * cosine - localY * sine,
-    y: bounds.cy + localX * sine + localY * cosine,
-  };
-}
-
-function stageToHeadLocal(bounds: HeadBounds, x: number, y: number): { x: number; y: number } {
-  const cosine = Math.cos(bounds.angle);
-  const sine = Math.sin(bounds.angle);
-  const dx = x - bounds.cx;
-  const dy = y - bounds.cy;
-  return {
-    x: dx * cosine + dy * sine,
-    y: -dx * sine + dy * cosine,
-  };
-}
-
-function spawnFirework(mode: 'entry' | 'sustain'): void {
-  const animation = authoredFirework;
-  if (!animation) {
-    void authoredFireworkReady.then((loaded) => {
-      if (loaded && interactionState === 'LAUGH' && fireworkBursts.length === 0) spawnFirework(mode);
-    });
-    return;
-  }
-  const rect = video.getBoundingClientRect();
-  const bounds = latestFeatures.headBounds;
-  const isEntry = mode === 'entry';
-  const coreCanvas = document.createElement('canvas');
-  coreCanvas.width = AUTHORED_FIREWORK_CACHE_SIZE;
-  coreCanvas.height = AUTHORED_FIREWORK_CACHE_SIZE;
-  const size = bounds
-    ? clamp(bounds.rx * (isEntry ? 2.78 : 2.58), 210, Math.min(390, rect.width * 0.72))
-    : Math.min(320, rect.width * 0.62);
-  const side = fireworkSequence % 2 === 0 ? -1 : 1;
-  fireworkSequence += 1;
-  const sideOffset = bounds ? Math.max(bounds.rx * 0.42, size * 0.15) : 0;
-  const burstX = bounds
-    ? clamp(bounds.cx + side * sideOffset, size * 0.30, rect.width - size * 0.30)
-    : rect.width * 0.45;
-  const burstY = bounds
-    ? clamp(bounds.cy - bounds.ry * 1.28, size * 0.27, rect.height * 0.36)
-    : rect.height * 0.22;
-  pushFireworkBurst({
-    x: burstX,
-    y: burstY,
-    size,
-    rotation: bounds ? bounds.angle * 0.14 : 0,
-    life: AUTHORED_FIREWORK_DURATION,
-    maxLife: AUTHORED_FIREWORK_DURATION,
-    alpha: isEntry ? 1 : 0.94,
-    coreCanvas,
-    lastCoreFrame: -1,
-    physicalParticles: animation.layers
-      .filter((layer) => layer.physical)
-      .flatMap((layer) => layer.groups.map((group) => ({
-        layer,
-        group,
-        previousAuthoredX: null,
-        previousAuthoredY: null,
-        x: 0,
-        y: 0,
-        vx: 0,
-        vy: 0,
-        rotation: 0,
-        collided: false,
-      }))),
-  });
-}
-
 function spawnProceduralFirework(mode: 'entry' | 'sustain'): void {
   const rect = video.getBoundingClientRect();
   proceduralFireworks.spawn(
@@ -1273,204 +1136,6 @@ function spawnProceduralFirework(mode: 'entry' | 'sustain'): void {
     { width: rect.width, height: rect.height },
     mode,
   );
-}
-
-function authoredSourceFrame(burst: FireworkBurst, animation: AuthoredFirework): number {
-  const progress = clamp(1 - burst.life / burst.maxLife, 0, 1);
-  return animation.inFrame + progress * (animation.outFrame - animation.inFrame - 0.001);
-}
-
-function authoredBurstAlpha(burst: FireworkBurst): number {
-  const progress = clamp(1 - burst.life / burst.maxLife, 0, 1);
-  const fadeIn = clamp(progress / 0.07, 0, 1);
-  const fadeOut = clamp((1 - progress) / 0.18, 0, 1);
-  return burst.alpha * Math.min(fadeIn, fadeOut) * Math.max(0.78, laughEffectMix);
-}
-
-function compositionToStage(
-  burst: FireworkBurst,
-  animation: AuthoredFirework,
-  x: number,
-  y: number,
-): { x: number; y: number } {
-  const scale = burst.size / animation.width;
-  const localX = (x - animation.width / 2) * scale;
-  const localY = (y - animation.height / 2) * scale;
-  const cosine = Math.cos(burst.rotation);
-  const sine = Math.sin(burst.rotation);
-  return {
-    x: burst.x + localX * cosine - localY * sine,
-    y: burst.y + localX * sine + localY * cosine,
-  };
-}
-
-interface HeadCollision {
-  x: number;
-  y: number;
-  nx: number;
-  ny: number;
-}
-
-function findHeadCollision(
-  previousX: number,
-  previousY: number,
-  currentX: number,
-  currentY: number,
-  bounds: HeadBounds,
-): HeadCollision | null {
-  const previousLocal = stageToHeadLocal(bounds, previousX, previousY);
-  const currentLocal = stageToHeadLocal(bounds, currentX, currentY);
-  const ellipseValue = (point: { x: number; y: number }): number =>
-    (point.x * point.x) / (bounds.rx * bounds.rx) + (point.y * point.y) / (bounds.ry * bounds.ry);
-  const previousValue = ellipseValue(previousLocal);
-  const currentValue = ellipseValue(currentLocal);
-  if (currentValue >= 1) return null;
-
-  let contactLocal: { x: number; y: number };
-  if (previousValue >= 1) {
-    // Particle crossed the head boundary between two render frames. Find the
-    // first contact point instead of allowing high-speed particles to tunnel.
-    let outsideT = 0;
-    let insideT = 1;
-    for (let iteration = 0; iteration < 6; iteration += 1) {
-      const midpoint = (outsideT + insideT) / 2;
-      const point = {
-        x: previousLocal.x + (currentLocal.x - previousLocal.x) * midpoint,
-        y: previousLocal.y + (currentLocal.y - previousLocal.y) * midpoint,
-      };
-      if (ellipseValue(point) >= 1) outsideT = midpoint;
-      else insideT = midpoint;
-    }
-    contactLocal = {
-      x: previousLocal.x + (currentLocal.x - previousLocal.x) * insideT,
-      y: previousLocal.y + (currentLocal.y - previousLocal.y) * insideT,
-    };
-  } else {
-    // If the user moves their head into an existing particle, both particle
-    // samples can already be inside the new ellipse. Project it back to the
-    // boundary so head motion also produces a visible physical response.
-    const projectionScale = 1 / Math.sqrt(Math.max(0.0001, currentValue));
-    contactLocal = {
-      x: currentLocal.x * projectionScale,
-      y: currentLocal.y * projectionScale,
-    };
-  }
-  const contact = headLocalToStage(bounds, contactLocal.x, contactLocal.y);
-  const gradientX = contactLocal.x / (bounds.rx * bounds.rx);
-  const gradientY = contactLocal.y / (bounds.ry * bounds.ry);
-  const gradientLength = Math.max(0.0001, Math.hypot(gradientX, gradientY));
-  const localNx = gradientX / gradientLength;
-  const localNy = gradientY / gradientLength;
-  const cosine = Math.cos(bounds.angle);
-  const sine = Math.sin(bounds.angle);
-  return {
-    x: contact.x,
-    y: contact.y,
-    nx: localNx * cosine - localNy * sine,
-    ny: localNx * sine + localNy * cosine,
-  };
-}
-
-function updateAuthoredParticles(
-  burst: FireworkBurst,
-  animation: AuthoredFirework,
-  frame: number,
-  deltaSeconds: number,
-  bounds: HeadBounds | null,
-): void {
-  for (const particle of burst.physicalParticles) {
-    const visibleOnAuthoredTimeline = frame >= particle.layer.inFrame && frame <= particle.layer.outFrame;
-    if (!visibleOnAuthoredTimeline && !particle.collided) {
-      particle.previousAuthoredX = null;
-      particle.previousAuthoredY = null;
-      continue;
-    }
-
-    if (particle.collided) {
-      particle.vy += 245 * deltaSeconds;
-      particle.vx *= 1 - Math.min(0.24, deltaSeconds * 1.45);
-      particle.x += particle.vx * deltaSeconds;
-      particle.y += particle.vy * deltaSeconds;
-      particle.rotation = Math.atan2(particle.vy, particle.vx);
-      continue;
-    }
-
-    const compositionPoint = groupCompositionPosition(particle.layer, particle.group, frame);
-    const authoredPoint = compositionToStage(burst, animation, compositionPoint.x, compositionPoint.y);
-    particle.x = authoredPoint.x;
-    particle.y = authoredPoint.y;
-
-    if (particle.previousAuthoredX !== null && particle.previousAuthoredY !== null && bounds) {
-      const safeDelta = Math.max(1 / 120, deltaSeconds);
-      const velocityX = (authoredPoint.x - particle.previousAuthoredX) / safeDelta;
-      const velocityY = (authoredPoint.y - particle.previousAuthoredY) / safeDelta;
-      const collision = findHeadCollision(
-        particle.previousAuthoredX,
-        particle.previousAuthoredY,
-        authoredPoint.x,
-        authoredPoint.y,
-        bounds,
-      );
-      if (collision) {
-        const normalVelocity = velocityX * collision.nx + velocityY * collision.ny;
-        const tangentVelocityX = velocityX - normalVelocity * collision.nx;
-        const tangentVelocityY = velocityY - normalVelocity * collision.ny;
-        const reboundNormalSpeed = Math.max(82, Math.max(0, -normalVelocity) * 0.66);
-        particle.x = collision.x + collision.nx * 2.5;
-        particle.y = collision.y + collision.ny * 2.5;
-        particle.vx = tangentVelocityX * 0.76 + collision.nx * reboundNormalSpeed;
-        particle.vy = tangentVelocityY * 0.76 + collision.ny * reboundNormalSpeed;
-        particle.rotation = Math.atan2(particle.vy, particle.vx);
-        particle.collided = true;
-        if (PREVIEW_FIREWORK) {
-          previewCollisionHits += 1;
-          canvas.dataset.collisionHits = String(previewCollisionHits);
-        }
-        pushCollisionFlash(
-          particle.x,
-          particle.y,
-          particle.layer.name.includes('White') ? 292 : 48,
-          collision.nx,
-          collision.ny,
-        );
-      } else if (Math.hypot(velocityX, velocityY) > 4) {
-        particle.rotation = Math.atan2(velocityY, velocityX);
-      }
-    }
-    particle.previousAuthoredX = authoredPoint.x;
-    particle.previousAuthoredY = authoredPoint.y;
-  }
-}
-
-function pushCollisionFlash(x: number, y: number, hue: number, nx = 0, ny = -1): void {
-  collisionFlashes.push({
-    x,
-    y,
-    radius: 3,
-    life: 0.34,
-    maxLife: 0.34,
-    hue,
-  });
-  if (collisionFlashes.length > MAX_COLLISION_FLASHES) collisionFlashes.shift();
-
-  for (let index = 0; index < 3; index += 1) {
-    const tangent = (Math.random() - 0.5) * 120;
-    const rebound = 95 + Math.random() * 155;
-    pushParticle({
-      kind: 'ember',
-      x,
-      y,
-      vx: nx * rebound - ny * tangent,
-      vy: ny * rebound + nx * tangent,
-      size: 1.5 + Math.random() * 1.3,
-      life: 0.32 + Math.random() * 0.18,
-      maxLife: 0.50,
-      hue: hue + (Math.random() - 0.5) * 18,
-      alpha: 0.62 + Math.random() * 0.30,
-      prevX: x,
-      prevY: y,
-    });
-  }
 }
 
 function updateSustainedFireworks(now: number): void {
@@ -1565,39 +1230,6 @@ function updateEffectMix(deltaSeconds: number): void {
   }
 }
 
-function updateCollisionFlashes(deltaSeconds: number): void {
-  for (let index = collisionFlashes.length - 1; index >= 0; index -= 1) {
-    const flash = collisionFlashes[index];
-    flash.life -= deltaSeconds;
-    if (flash.life <= 0) {
-      collisionFlashes.splice(index, 1);
-      continue;
-    }
-    const progress = 1 - flash.life / flash.maxLife;
-    flash.radius = 3 + progress * 17;
-  }
-}
-
-function updateFireworkBursts(deltaSeconds: number): void {
-  for (let index = fireworkBursts.length - 1; index >= 0; index -= 1) {
-    const burst = fireworkBursts[index];
-    burst.life -= deltaSeconds;
-    if (burst.life <= 0) {
-      fireworkBursts.splice(index, 1);
-      continue;
-    }
-    if (authoredFirework) {
-      updateAuthoredParticles(
-        burst,
-        authoredFirework,
-        authoredSourceFrame(burst, authoredFirework),
-        deltaSeconds,
-        latestFeatures.headBounds,
-      );
-    }
-  }
-}
-
 function drawStageAtmosphere(rect: DOMRect): void {
   if (!ctx) return;
 
@@ -1617,26 +1249,6 @@ function drawStageAtmosphere(rect: DOMRect): void {
   // grade here so the camera skin tone stays natural during LAUGH.
 }
 
-function drawCollisionFlashes(): void {
-  if (!ctx) return;
-  ctx.save();
-  ctx.globalCompositeOperation = 'screen';
-  for (const flash of collisionFlashes) {
-    const lifeRatio = Math.max(0, flash.life / flash.maxLife);
-    const progress = 1 - lifeRatio;
-    ctx.globalAlpha = Math.min(1, lifeRatio * 1.8) * 0.88;
-    ctx.fillStyle = `hsla(${flash.hue}, 100%, 86%, 0.92)`;
-    ctx.shadowColor = `hsla(${flash.hue}, 100%, 78%, 0.8)`;
-    ctx.shadowBlur = 8;
-    for (let index = 0; index < 6; index += 1) {
-      const angle = (Math.PI * 2 * index) / 6 + progress * 0.75;
-      const stableJitter = pseudoRandom(index * 8.521 + flash.x * 0.019 + flash.y * 0.013);
-      traceTaperedPetal(ctx, flash.x, angle, flash.radius * 0.12, flash.radius * (0.48 + stableJitter * 0.30), 2.3 + lifeRatio * 1.5);
-    }
-  }
-  ctx.restore();
-}
-
 function drawRainRipples(): void {
   if (!ctx || smileEffectMix <= 0.01) return;
   ctx.save();
@@ -1652,89 +1264,6 @@ function drawRainRipples(): void {
     ctx.stroke();
   }
   ctx.restore();
-}
-
-function traceTaperedPetal(
-  target: CanvasRenderingContext2D,
-  center: number,
-  angle: number,
-  startRadius: number,
-  length: number,
-  width: number,
-  bend = 0,
-): void {
-  target.save();
-  target.translate(center, center);
-  target.rotate(angle);
-  const end = startRadius + length;
-  target.beginPath();
-  target.moveTo(startRadius, 0);
-  target.bezierCurveTo(
-    startRadius + length * 0.18,
-    -width * 0.28 + bend * 0.18,
-    startRadius + length * 0.64,
-    -width * 0.54 + bend * 0.72,
-    end - width * 0.18,
-    -width * 0.28 + bend,
-  );
-  target.quadraticCurveTo(end + width * 0.10, bend, end - width * 0.18, width * 0.28 + bend);
-  target.bezierCurveTo(
-    startRadius + length * 0.64,
-    width * 0.54 + bend * 0.72,
-    startRadius + length * 0.20,
-    width * 0.28 + bend * 0.18,
-    startRadius,
-    0,
-  );
-  target.closePath();
-  target.fill();
-  target.restore();
-}
-
-function drawFireworkBursts(): void {
-  const animation = authoredFirework;
-  if (!ctx || !animation || laughEffectMix <= 0.01) return;
-  for (const burst of fireworkBursts) {
-    const frame = authoredSourceFrame(burst, animation);
-    const frameIndex = Math.floor(frame);
-    const alpha = authoredBurstAlpha(burst);
-    if (alpha <= 0.01) continue;
-
-    // Decorative stars are cached at the source animation's 30 fps, then
-    // composited as one bitmap. Only the authored moving groups stay as
-    // individual vectors because they are the particles that can collide.
-    if (burst.lastCoreFrame !== frameIndex) {
-      renderAuthoredCore(animation, burst.coreCanvas, frame);
-      burst.lastCoreFrame = frameIndex;
-    }
-    ctx.save();
-    ctx.globalCompositeOperation = 'screen';
-    ctx.globalAlpha = alpha;
-    ctx.translate(burst.x, burst.y);
-    ctx.rotate(burst.rotation);
-    ctx.shadowColor = 'rgba(255, 205, 160, 0.42)';
-    ctx.shadowBlur = 9;
-    ctx.drawImage(burst.coreCanvas, -burst.size / 2, -burst.size / 2, burst.size, burst.size);
-    ctx.restore();
-
-    const authoredScale = burst.size / animation.width;
-    ctx.save();
-    ctx.globalCompositeOperation = 'screen';
-    for (const particle of burst.physicalParticles) {
-      drawAuthoredPhysicalGroup(
-        ctx,
-        particle.layer,
-        particle.group,
-        particle.collided ? Math.min(frame, particle.layer.outFrame - 0.001) : frame,
-        particle.x,
-        particle.y,
-        authoredScale,
-        particle.collided ? particle.rotation : burst.rotation,
-        alpha,
-      );
-    }
-    ctx.restore();
-  }
 }
 
 function drawSparkleParticle(particle: Particle, lifeRatio: number, effectMix: number): void {
@@ -1946,9 +1475,7 @@ function resetExperience(): void {
   faceLandmarker = null;
   latestLandmarks = null;
   particles.length = 0;
-  collisionFlashes.length = 0;
   rainRipples.length = 0;
-  fireworkBursts.length = 0;
   proceduralFireworks.clear();
   smileEffectMix = 0;
   laughEffectMix = 0;
