@@ -492,15 +492,17 @@ export class ProceduralFireworkSystem {
         const outerAngle = baseAngle + (Math.random() - 0.5) * angularStep * 0.24;
         const silhouetteScale = 0.96
           + Math.sin(index * 2.399963 + rotationOffset) * 0.055;
-        const outerSpeed = (228 + Math.random() * 40) * scale * silhouetteScale;
+        // Slower launch speed plus stronger drag keeps the whole crown inside
+        // a readable radius instead of letting it disperse across the stage.
+        const outerSpeed = (178 + Math.random() * 28) * scale * silhouetteScale;
         addSpark(
           outerAngle,
           outerSpeed,
           (2.00 + Math.random() * 0.72) * Math.sqrt(scale),
           (36 + Math.random() * 12) * Math.sqrt(scale),
-          1.20 + Math.random() * 0.22,
-          (80 + Math.random() * 22) * scale,
-          1.48 + Math.random() * 0.14,
+          1.48 + Math.random() * 0.10,
+          (52 + Math.random() * 18) * scale,
+          1.88 + Math.random() * 0.14,
           0.026,
           false,
         );
@@ -518,9 +520,9 @@ export class ProceduralFireworkSystem {
             outerSpeed * (0.68 + Math.random() * 0.22),
             (1.68 + Math.random() * 0.58) * Math.sqrt(scale),
             (29 + Math.random() * 10) * Math.sqrt(scale),
-            1.10 + Math.random() * 0.20,
-            (85 + Math.random() * 20) * scale,
-            1.58 + Math.random() * 0.16,
+            1.45 + Math.random() * 0.10,
+            (58 + Math.random() * 18) * scale,
+            1.96 + Math.random() * 0.14,
             0.032,
             false,
           );
@@ -535,9 +537,9 @@ export class ProceduralFireworkSystem {
             outerSpeed * (0.25 + Math.random() * 0.30),
             (1.42 + Math.random() * 0.48) * Math.sqrt(scale),
             (26 + Math.random() * 11) * Math.sqrt(scale),
-            1.05 + Math.random() * 0.19,
-            (91 + Math.random() * 18) * scale,
-            1.72 + Math.random() * 0.16,
+            1.42 + Math.random() * 0.10,
+            (64 + Math.random() * 16) * scale,
+            2.04 + Math.random() * 0.14,
             0.020,
             true,
           );
@@ -559,7 +561,7 @@ export class ProceduralFireworkSystem {
 
     // Preserve the approved two-burst composition exactly. Collision is
     // handled separately and only activates on deliberate head movement.
-    emitBurst(mainX, mainY, isEntry ? 44 : 36, 1.30, isEntry ? 0.13 : 0.24, 0);
+    emitBurst(mainX, mainY, isEntry ? 44 : 36, 1.18, isEntry ? 0.13 : 0.24, 0);
     if (isEntry) {
       const accentX = bounds
         ? clamp(bounds.cx - side * bounds.rx * 1.34, horizontalMargin * 0.78, viewport.width - horizontalMargin * 0.78)
@@ -567,7 +569,7 @@ export class ProceduralFireworkSystem {
       const accentY = bounds
         ? clamp(bounds.cy - bounds.ry * 0.52, viewport.height * 0.18, viewport.height * 0.52)
         : viewport.height * 0.42;
-      emitBurst(accentX, accentY, 22, 0.82, 0.72, 41);
+      emitBurst(accentX, accentY, 22, 0.78, 0.72, 41);
 
       // Add one smaller interactive satellite on the roomier side without
       // replacing either approved burst. Its resting gap means the viewer has
@@ -587,7 +589,7 @@ export class ProceduralFireworkSystem {
       const satelliteY = bounds
         ? clamp(bounds.cy + bounds.ry * 0.08, viewport.height * 0.24, viewport.height * 0.68)
         : viewport.height * 0.48;
-      emitBurst(satelliteX, satelliteY, 16, 0.70, 0.42, 73, true);
+      emitBurst(satelliteX, satelliteY, 16, 0.65, 0.42, 73, true);
     }
     if (this.sparks.length > MAX_SPARKS) this.sparks.splice(0, this.sparks.length - MAX_SPARKS);
     while (this.flashes.length > MAX_FLASHES) this.flashes.shift();
@@ -838,9 +840,12 @@ export class ProceduralFireworkSystem {
       const fadeIn = Math.min(1, spark.age / 0.055);
       // Hold the useful visible phase longer so a 100-particle burst actually
       // reads as dense; fading half the particles early made it look like 40.
-      const fadeOut = progress < 0.66
+      // Once the crown is open, opacity falls continuously while drag keeps
+      // its radius nearly stable. The firework now disappears by fading as a
+      // whole instead of flying apart into a few isolated sparks.
+      const fadeOut = progress < 0.48
         ? 1
-        : Math.pow(1 - (progress - 0.66) / 0.34, 0.84);
+        : 1 - (progress - 0.48) / 0.52;
       const alpha = fadeIn * fadeOut;
       if (alpha <= 0.015) continue;
       const geometry = sparkTrailGeometry(spark);
