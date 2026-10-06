@@ -4,7 +4,11 @@
 
 ## Live Demo
 
-Vercel 部署完成后补充公开体验地址。
+[在线体验](https://temporary-quick-sienna-gasy52q.vercel.app)
+
+## Source Code
+
+[GitHub 公开仓库](https://github.com/Fliex-jie/zijie-tiktok-live-ar-demo)
 
 ## 核心体验
 
@@ -50,8 +54,10 @@ npm run preview
 
 ## 性能策略
 
+- 摄像头根据设备 CPU、内存提示选择 1080p、720p 或 480p，并根据真实渲染 FPS 与推理耗时自动降级；
 - 人脸推理与视觉渲染分频执行；
 - 渲染循环以 60 FPS 为上限；
+- Safari 仅在雨幕激活时以 480×270、20 FPS 执行透明合成，避免黑幕并限制主线程开销；
 - 粒子使用固定容量数组，避免持续增长；
 - 同一组人脸关键点复用于表情判断与头部碰撞，避免重复推理；
 - MediaPipe 模型与 WASM 版本固定，降低运行时不确定性。

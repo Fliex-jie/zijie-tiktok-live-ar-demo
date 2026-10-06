@@ -13,6 +13,26 @@ const PREVIEW_MODE = URL_PARAMS.get('preview');
 const PREVIEW_FIREWORK = PREVIEW_MODE === 'firework' || PREVIEW_MODE === 'collision';
 const PREVIEW_HEAD_SWEEP = PREVIEW_MODE === 'collision';
 const PREVIEW_RAIN = PREVIEW_MODE === 'rain';
+const IS_WEBKIT_BROWSER = /AppleWebKit/i.test(navigator.userAgent) && !/(Chrome|Chromium|Edg|OPR|Android)/i.test(navigator.userAgent);
+const CAMERA_PERFORMANCE_GRACE_MS = 8000;
+const CAMERA_POOR_WINDOWS_BEFORE_DOWNGRADE = 4;
+const WEBKIT_RAIN_FRAME_INTERVAL_MS = 1000 / 20;
+const WEBKIT_RAIN_WIDTH = 480;
+
+const CAMERA_PROFILES = [
+  { tier: 'high', label: '1080p', width: 1920, height: 1080, frameRate: 30 },
+  { tier: 'balanced', label: '720p', width: 1280, height: 720, frameRate: 30 },
+  { tier: 'efficient', label: '480p', width: 640, height: 480, frameRate: 30 },
+] as const;
+
+type CameraProfile = (typeof CAMERA_PROFILES)[number];
+
+interface DevicePerformanceNavigator extends Navigator {
+  deviceMemory?: number;
+  connection?: {
+    saveData?: boolean;
+  };
+}
 
 // The model reports a new value every frame, so the thresholds deliberately
 // use a gap between entering and leaving a state (hysteresis). This keeps a
@@ -139,6 +159,10 @@ interface RainRipple {
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('App root not found');
+document.documentElement.classList.toggle(
+  'webkit-rain-blend',
+  IS_WEBKIT_BROWSER,
+);
 
 app.innerHTML = `
   <div class="app-frame">
@@ -192,7 +216,10 @@ app.innerHTML = `
           <div class="stage-wrap">
             <video id="camera" autoplay muted playsinline></video>
             <div class="rain-grade" aria-hidden="true"></div>
-            <video id="rain-footage" class="rain-footage" src="/assets/rain-overlay-candidate.mp4" muted loop playsinline preload="metadata" aria-hidden="true"></video>
+            <div class="rain-footage-layer" aria-hidden="true">
+              <video id="rain-footage" class="rain-footage" src="/assets/rain-overlay-candidate.mp4" muted loop playsinline preload="metadata"></video>
+            </div>
+            <canvas id="rain-composite" class="rain-composite" aria-hidden="true"></canvas>
             <canvas id="overlay"></canvas><div class="stage-shade"></div>
             <div id="stage-message" class="stage-message">
               <div class="message-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M15 10.5 19.5 8v8L15 13.5v-3Z"/><rect x="3" y="6" width="12" height="12" rx="3"/></svg></div>
@@ -235,6 +262,8 @@ app.innerHTML = `
 
 const video = document.querySelector<HTMLVideoElement>('#camera')!;
 const rainFootage = document.querySelector<HTMLVideoElement>('#rain-footage')!;
+const rainComposite = document.querySelector<HTMLCanvasElement>('#rain-composite')!;
+const rainCompositeContext = rainComposite.getContext('2d');
 const stageWrap = document.querySelector<HTMLDivElement>('.stage-wrap')!;
 const canvas = document.querySelector<HTMLCanvasElement>('#overlay')!;
 const ctx = canvas.getContext('2d');
@@ -259,6 +288,8 @@ const effectValue = document.querySelector<HTMLElement>('#effect-value')!;
 const audioValue = document.querySelector<HTMLElement>('#audio-value')!;
 const audioStatus = document.querySelector<HTMLElement>('#audio-status')!;
 const hint = document.querySelector<HTMLElement>('#hint')!;
+const rainFrameSampler = document.createElement('canvas');
+const rainFrameSamplerContext = rainFrameSampler.getContext('2d');
 
 let faceLandmarker: FaceLandmarker | null = null;
 let stream: MediaStream | null = null;
@@ -306,6 +337,11 @@ let latestFeatures: FeatureSnapshot = {
 let frameCount = 0;
 let lastFpsAt = performance.now();
 let renderFps = 0;
+let cameraQualityIndex = 1;
+let cameraStartedAt = 0;
+let cameraPoorPerformanceWindows = 0;
+let cameraConstraintPending = false;
+let lastWebKitRainFrameAt = -Infinity;
 let previousRenderAt = performance.now();
 let lastVisualFrameAt = -Infinity;
 let rainAccumulator = 0;
@@ -317,6 +353,78 @@ let laughEffectMix = 0;
 let rainFootagePlaying = false;
 let previewInitialized = false;
 const proceduralFireworks = new ProceduralFireworkSystem();
+
+function chooseInitialCameraQuality(): number {
+  const deviceNavigator = navigator as DevicePerformanceNavigator;
+  const cpuThreads = navigator.hardwareConcurrency || 0;
+  const memoryGb = deviceNavigator.deviceMemory || 0;
+  let score = 0;
+
+  if (cpuThreads >= 8) score += 2;
+  else if (cpuThreads > 0 && cpuThreads <= 2) score -= 2;
+
+  if (memoryGb >= 8) score += 2;
+  else if (memoryGb > 0 && memoryGb <= 2) score -= 2;
+
+  if (deviceNavigator.connection?.saveData) score -= 3;
+  if (score >= 2) return 0;
+  if (score <= -2) return 2;
+  return 1;
+}
+
+function cameraConstraints(profile: CameraProfile): MediaTrackConstraints {
+  return {
+    facingMode: 'user',
+    width: { ideal: profile.width, max: profile.width },
+    height: { ideal: profile.height, max: profile.height },
+    frameRate: { ideal: profile.frameRate, max: profile.frameRate },
+  };
+}
+
+function updateCameraDiagnostics(profile: CameraProfile): void {
+  const settings = stream?.getVideoTracks()[0]?.getSettings();
+  video.dataset.cameraTier = profile.tier;
+  video.dataset.cameraRequested = `${profile.width}x${profile.height}@${profile.frameRate}`;
+  video.dataset.cameraActual = `${settings?.width ?? video.videoWidth}x${settings?.height ?? video.videoHeight}@${Math.round(settings?.frameRate ?? 0)}`;
+}
+
+async function downgradeCameraQuality(): Promise<void> {
+  if (!stream || cameraConstraintPending || cameraQualityIndex >= CAMERA_PROFILES.length - 1) return;
+  const track = stream.getVideoTracks()[0];
+  if (!track) return;
+
+  cameraConstraintPending = true;
+  const nextIndex = cameraQualityIndex + 1;
+  const nextProfile = CAMERA_PROFILES[nextIndex];
+  try {
+    await track.applyConstraints(cameraConstraints(nextProfile));
+    cameraQualityIndex = nextIndex;
+    cameraStartedAt = performance.now();
+    cameraPoorPerformanceWindows = 0;
+    updateCameraDiagnostics(nextProfile);
+    resizeCanvas();
+    hint.textContent = `检测到设备运行压力，摄像头已自动调整为 ${nextProfile.label}。`;
+  } catch (error) {
+    console.warn('Unable to lower camera resolution automatically.', error);
+  } finally {
+    cameraConstraintPending = false;
+  }
+}
+
+function evaluateCameraPerformance(now: number): void {
+  if (!stream || uiState !== 'running' || document.visibilityState !== 'visible') return;
+  if (cameraQualityIndex >= CAMERA_PROFILES.length - 1 || now - cameraStartedAt < CAMERA_PERFORMANCE_GRACE_MS) return;
+
+  const inferenceIsSlow = latestFeatures.lastUpdatedAt > 0 && latestFeatures.inferenceMs > 65;
+  const renderingIsSlow = renderFps > 0 && renderFps < 42;
+  cameraPoorPerformanceWindows = inferenceIsSlow || renderingIsSlow
+    ? cameraPoorPerformanceWindows + 1
+    : Math.max(0, cameraPoorPerformanceWindows - 1);
+
+  if (cameraPoorPerformanceWindows >= CAMERA_POOR_WINDOWS_BEFORE_DOWNGRADE) {
+    void downgradeCameraQuality();
+  }
+}
 
 function setUiState(next: UiState, message?: string): void {
   uiState = next;
@@ -332,13 +440,53 @@ function setUiState(next: UiState, message?: string): void {
 }
 
 function resizeCanvas(): void {
-  const rect = video.getBoundingClientRect();
+  const rect = stageWrap.getBoundingClientRect();
   const dpr = Math.min(window.devicePixelRatio || 1, MAX_CANVAS_DPR);
   canvas.width = Math.max(1, Math.floor(rect.width * dpr));
   canvas.height = Math.max(1, Math.floor(rect.height * dpr));
   canvas.style.width = `${rect.width}px`;
   canvas.style.height = `${rect.height}px`;
   ctx?.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function updateWebKitRainComposite(now: number): void {
+  if (
+    !IS_WEBKIT_BROWSER ||
+    !rainCompositeContext ||
+    !rainFrameSamplerContext ||
+    !rainFootagePlaying ||
+    rainFootage.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+    now - lastWebKitRainFrameAt < WEBKIT_RAIN_FRAME_INTERVAL_MS
+  ) return;
+
+  lastWebKitRainFrameAt = now;
+  const sourceRatio = rainFootage.videoHeight > 0
+    ? rainFootage.videoHeight / rainFootage.videoWidth
+    : 9 / 16;
+  const width = WEBKIT_RAIN_WIDTH;
+  const height = Math.max(1, Math.round(width * sourceRatio));
+  if (rainFrameSampler.width !== width || rainFrameSampler.height !== height) {
+    rainFrameSampler.width = width;
+    rainFrameSampler.height = height;
+    rainComposite.width = width;
+    rainComposite.height = height;
+  }
+
+  rainFrameSamplerContext.drawImage(rainFootage, 0, 0, width, height);
+  const frame = rainFrameSamplerContext.getImageData(0, 0, width, height);
+  for (let index = 0; index < frame.data.length; index += 4) {
+    const luminance = (
+      frame.data[index] * 0.2126 +
+      frame.data[index + 1] * 0.7152 +
+      frame.data[index + 2] * 0.0722
+    ) / 255;
+    const keyedLuminance = Math.max(0, Math.min(1, (luminance * 0.59 - 0.5) * 6 + 0.5));
+    frame.data[index] = 238;
+    frame.data[index + 1] = 246;
+    frame.data[index + 2] = 250;
+    frame.data[index + 3] = Math.round(keyedLuminance * 255);
+  }
+  rainCompositeContext.putImageData(frame, 0, 0);
 }
 
 function setStageOrientation(orientation: 'landscape' | 'portrait'): void {
@@ -1046,7 +1194,7 @@ function updateInteraction(now: number): void {
 
 function drawDebugFace(): void {
   if (!SHOW_DEBUG_LANDMARKS || !ctx) return;
-  const rect = video.getBoundingClientRect();
+  const rect = stageWrap.getBoundingClientRect();
   ctx.save();
   ctx.fillStyle = 'rgba(141, 255, 207, 0.72)';
   if (latestLandmarks) {
@@ -1130,7 +1278,7 @@ function spawnRainSplash(width: number, height: number): void {
 }
 
 function spawnProceduralFirework(mode: 'entry' | 'sustain'): void {
-  const rect = video.getBoundingClientRect();
+  const rect = stageWrap.getBoundingClientRect();
   proceduralFireworks.spawn(
     latestFeatures.headBounds,
     { width: rect.width, height: rect.height },
@@ -1330,10 +1478,11 @@ function render(now: number): void {
     renderFps = frameCount;
     frameCount = 0;
     lastFpsAt = now;
+    evaluateCameraPerformance(now);
     if (PREVIEW_FIREWORK || PREVIEW_RAIN) updateHud();
   }
 
-  const rect = video.getBoundingClientRect();
+  const rect = stageWrap.getBoundingClientRect();
   if (PREVIEW_RAIN && !previewInitialized && rect.width > 0) {
     previewInitialized = true;
     stageMessage.hidden = true;
@@ -1403,6 +1552,7 @@ function render(now: number): void {
   previousRenderAt = now;
   updateSustainedFireworks(now);
   updateEffectMix(deltaSeconds);
+  updateWebKitRainComposite(now);
   updateParticles(deltaSeconds, rect);
   updateRainRipples(deltaSeconds);
   proceduralFireworks.update(deltaSeconds, latestFeatures.headBounds);
@@ -1440,12 +1590,17 @@ async function startExperience(): Promise<void> {
   startButton.disabled = true;
 
   try {
+    cameraQualityIndex = chooseInitialCameraQuality();
+    const initialCameraProfile = CAMERA_PROFILES[cameraQualityIndex];
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+      video: cameraConstraints(initialCameraProfile),
       audio: false,
     });
     video.srcObject = stream;
     await video.play();
+    cameraStartedAt = performance.now();
+    cameraPoorPerformanceWindows = 0;
+    updateCameraDiagnostics(initialCameraProfile);
     resizeCanvas();
     faceLandmarker = await createLandmarker();
     stageMessage.classList.add('hidden');
@@ -1488,6 +1643,15 @@ function resetExperience(): void {
   stageWrap.style.setProperty('--rain-lens-opacity', '0');
   stageWrap.classList.remove('rain-active');
   rainFootagePlaying = false;
+  lastWebKitRainFrameAt = -Infinity;
+  rainCompositeContext?.clearRect(0, 0, rainComposite.width, rainComposite.height);
+  cameraQualityIndex = 1;
+  cameraStartedAt = 0;
+  cameraPoorPerformanceWindows = 0;
+  cameraConstraintPending = false;
+  delete video.dataset.cameraTier;
+  delete video.dataset.cameraRequested;
+  delete video.dataset.cameraActual;
   smoothedSmile = 0;
   smoothedJaw = 0;
   smoothedCheekSquint = 0;
@@ -1549,4 +1713,5 @@ window.addEventListener('resize', resizeCanvas);
 setStageOrientation('landscape');
 updateChatSendState();
 setUiState('idle');
-requestAnimationFrame(render);
+if (PREVIEW_FIREWORK || PREVIEW_RAIN) render(performance.now());
+else requestAnimationFrame(render);
