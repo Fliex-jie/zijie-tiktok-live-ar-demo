@@ -55,7 +55,3 @@ npm run preview
 - 粒子使用固定容量数组，避免持续增长；
 - 烟花装饰层缓存到离屏 Canvas；
 - MediaPipe 模型与 WASM 版本固定，降低运行时不确定性。
-
-## 素材说明
-
-雨幕中景素材来自 [Pexels · Heavy Rain Falling on Black Background](https://www.pexels.com/video/heavy-rain-falling-on-black-background-36344044/)，项目内使用转码版本并遵循 Pexels License。
