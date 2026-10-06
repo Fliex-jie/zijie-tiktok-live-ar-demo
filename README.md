@@ -4,7 +4,7 @@
 
 ## Live Demo
 
-[在线体验](https://temporary-quick-sienna-gasy52q.vercel.app)
+[在线体验](https://part2-vibe-ar.vercel.app)
 
 ## Source Code
 
