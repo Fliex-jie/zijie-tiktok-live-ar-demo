@@ -1473,6 +1473,14 @@ function render(now: number): void {
     return;
   }
   lastVisualFrameAt = now;
+  const elapsedSeconds = Math.max(0, (now - previousRenderAt) / 1000);
+  const deltaSeconds = Math.min(0.05, elapsedSeconds);
+  previousRenderAt = now;
+  // Age only pre-existing fireworks through a stall. Keep this before preview
+  // setup and interaction transitions, both of which can spawn fresh bursts.
+  if (elapsedSeconds > deltaSeconds) {
+    proceduralFireworks.elapseStalledTime(elapsedSeconds - deltaSeconds);
+  }
   frameCount += 1;
   if (now - lastFpsAt >= 1000) {
     renderFps = frameCount;
@@ -1548,14 +1556,12 @@ function render(now: number): void {
   // extra delay when SMILE upgrades to LAUGH without increasing model load.
   if (uiState === 'running' && !PREVIEW_FIREWORK && !PREVIEW_RAIN) updateInteraction(performance.now());
 
-  const deltaSeconds = Math.min(0.05, (now - previousRenderAt) / 1000);
-  previousRenderAt = now;
   updateSustainedFireworks(now);
   updateEffectMix(deltaSeconds);
   updateWebKitRainComposite(now);
   updateParticles(deltaSeconds, rect);
   updateRainRipples(deltaSeconds);
-  proceduralFireworks.update(deltaSeconds, latestFeatures.headBounds);
+  proceduralFireworks.update(deltaSeconds, latestFeatures.headBounds, elapsedSeconds);
   if (PREVIEW_RAIN) canvas.dataset.activeParticles = String(particles.length);
   if (PREVIEW_FIREWORK) {
     canvas.dataset.collisionHits = String(proceduralFireworks.collisionCount);

@@ -706,9 +706,40 @@ export class ProceduralFireworkSystem {
     return samples;
   }
 
-  update(deltaSeconds: number, bounds: FireworkHeadBounds | null): void {
+  // Account for time omitted by the bounded motion step, before this frame
+  // spawns anything. Old effects expire on time without ageing a new burst
+  // through the stall or replaying expensive physics/collisions to catch up.
+  elapseStalledTime(seconds: number): void {
+    if (seconds <= 0) return;
+    for (let index = this.flashes.length - 1; index >= 0; index -= 1) {
+      const flash = this.flashes[index];
+      flash.age += seconds;
+      if (flash.age >= flash.life) this.flashes.splice(index, 1);
+    }
+    for (let index = this.sparks.length - 1; index >= 0; index -= 1) {
+      const spark = this.sparks[index];
+      spark.age += seconds;
+      spark.collisionCooldown = Math.max(0, spark.collisionCooldown - seconds);
+      if (spark.age >= spark.life) this.sparks.splice(index, 1);
+    }
+  }
+
+  update(
+    deltaSeconds: number,
+    bounds: FireworkHeadBounds | null,
+    elapsedSeconds = deltaSeconds,
+  ): void {
+    // A resumed tab has no reliable head-motion path through the missing
+    // frames. Reacquire instead of sweeping fresh particles across stale data.
+    if (elapsedSeconds > 0.25) {
+      this.previousHeadCenter = null;
+      this.previousCollisionBounds = null;
+      this.headSampleAge = 0;
+      this.headVelocityX = 0;
+      this.headVelocityY = 0;
+    }
     const collisionBounds = this.collisionBoundsForFrame(bounds);
-    this.updateHeadVelocity(deltaSeconds, bounds);
+    this.updateHeadVelocity(elapsedSeconds, bounds);
     for (let index = this.flashes.length - 1; index >= 0; index -= 1) {
       const flash = this.flashes[index];
       flash.age += deltaSeconds;
