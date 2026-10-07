@@ -355,7 +355,7 @@ function drawDerivedAfterglow(
     const lateralOffset = Math.sin(detailPhase + step * 2.35)
       * radius
       * (0.26 + step * 0.16);
-    target.globalAlpha = alpha * (0.28 - step * 0.09);
+    target.globalAlpha = alpha * (0.36 - step * 0.12);
     target.beginPath();
     target.arc(
       geometry.tailX - ux * distance + nx * lateralOffset,
@@ -399,6 +399,7 @@ export class ProceduralFireworkSystem {
   }
 
   spawn(bounds: FireworkHeadBounds | null, viewport: FireworkViewport, mode: 'entry' | 'sustain'): void {
+    const previousSparkCount = this.sparks.length;
     const side = this.sequence % 2 === 0 ? -1 : 1;
     const isEntry = mode === 'entry';
     if (isEntry) {
@@ -559,18 +560,19 @@ export class ProceduralFireworkSystem {
       });
     };
 
-    // Preserve the approved two-burst composition exactly. Collision is
-    // handled separately and only activates on deliberate head movement.
+    // Keep the approved main burst intact. Sustained laughter also gets a
+    // smaller companion in the same spawn call, swapping sides as a pair.
+    // The companion uses fewer spokes rather than doubling the main burst.
     emitBurst(mainX, mainY, isEntry ? 44 : 36, 1.18, isEntry ? 0.13 : 0.24, 0);
-    if (isEntry) {
-      const accentX = bounds
-        ? clamp(bounds.cx - side * bounds.rx * 1.34, horizontalMargin * 0.78, viewport.width - horizontalMargin * 0.78)
-        : viewport.width * (side < 0 ? 0.64 : 0.36);
-      const accentY = bounds
-        ? clamp(bounds.cy - bounds.ry * 0.52, viewport.height * 0.18, viewport.height * 0.52)
-        : viewport.height * 0.42;
-      emitBurst(accentX, accentY, 22, 0.78, 0.72, 41);
+    const accentX = bounds
+      ? clamp(bounds.cx - side * bounds.rx * 1.34, horizontalMargin * 0.78, viewport.width - horizontalMargin * 0.78)
+      : viewport.width * (side < 0 ? 0.64 : 0.36);
+    const accentY = bounds
+      ? clamp(bounds.cy - bounds.ry * 0.52, viewport.height * 0.18, viewport.height * 0.52)
+      : viewport.height * 0.42;
+    emitBurst(accentX, accentY, isEntry ? 22 : 14, isEntry ? 0.78 : 0.68, 0.72, 41);
 
+    if (isEntry) {
       // Add one smaller interactive satellite on the roomier side without
       // replacing either approved burst. Its resting gap means the viewer has
       // to move the head toward it before any physical response is possible.
@@ -591,7 +593,23 @@ export class ProceduralFireworkSystem {
         : viewport.height * 0.48;
       emitBurst(satelliteX, satelliteY, 16, 0.65, 0.42, 73, true);
     }
-    if (this.sparks.length > MAX_SPARKS) this.sparks.splice(0, this.sparks.length - MAX_SPARKS);
+    const overflow = this.sparks.length - MAX_SPARKS;
+    if (overflow > 0) {
+      // Insertion order follows the burst's angles. Removing a contiguous
+      // prefix cuts a visible wedge from its crown. Retire the most faded
+      // existing sparks instead, keeping the new burst intact. Normalized
+      // age follows the fade curve; sorting runs only on overflow, not frames.
+      const retiring = new Set(
+        this.sparks.slice(0, previousSparkCount)
+          .sort((a, b) => b.age / b.life - a.age / a.life)
+          .slice(0, overflow),
+      );
+      let writeIndex = 0;
+      for (const spark of this.sparks) {
+        if (!retiring.has(spark)) this.sparks[writeIndex++] = spark;
+      }
+      this.sparks.length = writeIndex;
+    }
     while (this.flashes.length > MAX_FLASHES) this.flashes.shift();
   }
 
@@ -811,9 +829,12 @@ export class ProceduralFireworkSystem {
       const progress = clamp(flash.age / flash.life, 0, 1);
       const radius = flash.radius * (0.40 + progress * 0.90);
       const gradient = target.createRadialGradient(flash.x, flash.y, 0, flash.x, flash.y, radius);
+      const isBurst = flash.kind === 'burst';
+      // A brighter local ignition, using the same gradient and footprint.
+      // Collision flashes, blur passes, lifetime and camera remain unchanged.
       gradient.addColorStop(0, withAlpha(flash.color, 1));
-      gradient.addColorStop(0.16, withAlpha(flash.color, 0.62));
-      gradient.addColorStop(0.40, withAlpha(flash.color, 0.18));
+      gradient.addColorStop(isBurst ? 0.20 : 0.16, withAlpha(flash.color, isBurst ? 0.76 : 0.62));
+      gradient.addColorStop(isBurst ? 0.44 : 0.40, withAlpha(flash.color, isBurst ? 0.24 : 0.18));
       gradient.addColorStop(1, 'rgba(255,255,255,0)');
       const flashFade = flash.kind === 'burst'
         ? Math.pow(1 - progress, 0.68)
@@ -843,9 +864,9 @@ export class ProceduralFireworkSystem {
       // Once the crown is open, opacity falls continuously while drag keeps
       // its radius nearly stable. The firework now disappears by fading as a
       // whole instead of flying apart into a few isolated sparks.
-      const fadeOut = progress < 0.48
+      const fadeOut = progress < 0.62
         ? 1
-        : 1 - (progress - 0.48) / 0.52;
+        : 1 - (progress - 0.62) / 0.38;
       const alpha = fadeIn * fadeOut;
       if (alpha <= 0.015) continue;
       const geometry = sparkTrailGeometry(spark);
@@ -882,13 +903,15 @@ export class ProceduralFireworkSystem {
       if (spark.glow > 0) target.shadowBlur = 0;
 
       if (spark.glow === 0) {
-        target.globalAlpha = alpha * 0.90;
+        // Lift the existing leading highlight, not the full ribbon or blur.
+        // This adds no draw calls, particles, or changes to the fade timing.
+        target.globalAlpha = alpha;
         target.fillStyle = '#fffdf4';
         target.beginPath();
         target.arc(
           geometry.headX,
           geometry.headY,
-          Math.max(0.70, drawRadius * 0.34),
+          Math.max(0.80, drawRadius * 0.48),
           0,
           Math.PI * 2,
         );

@@ -76,8 +76,8 @@ const AUDIO_CALIBRATION_MS = 700;
 const AUDIO_MIN_DYNAMIC_RANGE = 0.012;
 const FIREWORK_ENTRY_COOLDOWN_MS = 260;
 const FIREWORK_SEQUENCE_WINDOW_MS = 1500;
-const FIREWORK_SEQUENCE_INTERVAL_MS = 1500;
-const FIREWORK_REPEAT_MS = 1800;
+const FIREWORK_SEQUENCE_INTERVAL_MS = 1300;
+const FIREWORK_REPEAT_MS = 1300;
 const RAIN_DROP_RATE = 18;
 const RAIN_SPLASH_RATE = 6.5;
 const MAX_PARTICLES = 180;
@@ -1293,8 +1293,8 @@ function updateSustainedFireworks(now: number): void {
     ? FIREWORK_SEQUENCE_INTERVAL_MS
     : FIREWORK_REPEAT_MS;
   if (now - lastFireworkAt < repeatInterval) return;
-  // The particle system owns a fixed-size ring buffer, so a light follow-up
-  // burst can overlap the previous tails without increasing the frame budget.
+  // Each follow-up emits a large/small pair. The 220-spark cap bounds peak
+  // population; overlapping pairs still increase average rendering work.
   spawnProceduralFirework('sustain');
   lastFireworkAt = now;
 }
@@ -1394,8 +1394,7 @@ function drawStageAtmosphere(rect: DOMRect): void {
     ctx.restore();
   }
 
-  // Firework sprites carry their own local bloom. Avoid a full-frame warm
-  // grade here so the camera skin tone stays natural during LAUGH.
+  // Fireworks carry their own local light; do not alter camera exposure.
 }
 
 function drawRainRipples(): void {
