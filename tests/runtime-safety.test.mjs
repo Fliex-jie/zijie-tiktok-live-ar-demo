@@ -61,10 +61,10 @@ function element() {
 function harness() {
   let now = 0;
   const cameras = [], microphones = [], models = [], audioPlans = [];
-  const frames = [], scheduled = [], contexts = [], mediaRequests = [];
+  const frames = [], scheduled = [], contexts = [], mediaRequests = [], warnings = [];
   const video = { ...element(), srcObject: null, readyState: 0, pauses: 0, async play() {}, pause() { this.pauses += 1; } };
   const sandbox = {
-    console: { error() {}, warn() {} }, DOMException,
+    console: { error() {}, warn(...args) { warnings.push(args); } }, DOMException,
     performance: { now: () => now }, document: { visibilityState: 'visible' },
     window: { devicePixelRatio: 1 }, HTMLMediaElement: { HAVE_CURRENT_DATA: 2 },
     navigator: { hardwareConcurrency: 4, mediaDevices: { getUserMedia(options) {
@@ -98,11 +98,14 @@ function harness() {
     },
   };
   for (const name of ['startButton', 'resetButton', 'audioButton', 'audioStatus', 'statusPill', 'hint', 'stageMessage', 'stageWrap']) sandbox[name] = element();
+  // Match the disabled controls in the initial production HTML.
+  sandbox.resetButton.disabled = true;
+  sandbox.audioButton.disabled = true;
   for (const name of ['resizeCanvas', 'updateHud', 'sampleAudio', 'updateInteraction', 'updateSustainedFireworks', 'updateEffectMix', 'updateWebKitRainComposite', 'updateParticles', 'updateRainRipples', 'drawStageAtmosphere', 'drawRainRipples', 'drawParticles', 'drawDebugFace']) sandbox[name] = () => {};
   const context = vm.createContext(sandbox);
-  vm.runInContext(`${compiled}\nglobalThis.api = { ${functions.join(',')}, state: () => ({ uiState, stream, faceLandmarker, faceLandmarkerLoadPromise, audioStream, audioContext, audioEnabled, audioAnalyser, audioSamples, renderFps, cameraQualityIndex, cameraPoorPerformanceWindows }) };`, context);
+  vm.runInContext(`${compiled}\nglobalThis.api = { ${functions.join(',')}, state: () => ({ uiState, stream, faceLandmarker, faceLandmarkerLoadPromise, audioStream, audioContext, audioEnabled, audioAnalyser, audioSamples, renderFps, cameraQualityIndex, cameraPoorPerformanceWindows, cameraConstraintPending, cameraStartedAt }) };`, context);
   return {
-    ...sandbox.api, sandbox, cameras, microphones, models, audioPlans, contexts, frames, scheduled, mediaRequests, video,
+    ...sandbox.api, sandbox, cameras, microphones, models, audioPlans, contexts, frames, scheduled, mediaRequests, warnings, video,
     tick(timestamp) { now = timestamp; sandbox.api.render(timestamp); },
   };
 }
@@ -123,6 +126,91 @@ function audioUi(h) {
     pressed: h.sandbox.audioButton.attributes['aria-pressed'], hint: h.sandbox.hint.textContent,
   };
 }
+
+function cameraUi(h) {
+  const state = h.state();
+  return {
+    uiState: state.uiState, cameraQualityIndex: state.cameraQualityIndex,
+    cameraStartedAt: state.cameraStartedAt, cameraPoorPerformanceWindows: state.cameraPoorPerformanceWindows,
+    cameraConstraintPending: state.cameraConstraintPending,
+    dataset: { ...h.video.dataset }, hint: h.sandbox.hint.textContent,
+    resetDisabled: h.sandbox.resetButton.disabled, startDisabled: h.sandbox.startButton.disabled,
+  };
+}
+
+for (const restart of [false, true]) {
+  for (const outcome of ['resolve', 'reject']) {
+    test(`model loading can be reset${restart ? ' and restarted' : ''}; obsolete ${outcome} cannot change UI`, async () => {
+      const h = harness(), delayed = deferred(), camera = mediaStream(), model = faceModel();
+      h.cameras.push(camera); h.models.push(delayed.promise);
+      const pending = h.startExperience(); await flush();
+      assert.equal(h.video.srcObject, camera);
+      assert.equal(h.state().uiState, 'loading');
+      assert.equal(h.sandbox.resetButton.disabled, false, 'reset must be available while the model is pending');
+      assert.equal(h.sandbox.audioButton.disabled, true);
+      h.resetExperience();
+      assert.equal(camera.track.readyState, 'ended', 'reset must stop the camera before model settlement');
+      assert.equal(h.video.srcObject, null);
+      assert.equal(h.state().uiState, 'idle');
+      const current = restart ? await start(h) : null;
+      const ui = cameraUi(h);
+      if (outcome === 'resolve') delayed.resolve(model);
+      else delayed.reject(new Error('obsolete model failure'));
+      await pending; await flush();
+      assert.deepEqual(cameraUi(h), ui);
+      assert.equal(h.video.srcObject, current?.camera ?? null);
+      assert.equal(h.state().faceLandmarker, current?.model ?? null);
+      if (current) assert.equal(current.camera.track.stops, 0);
+      if (outcome === 'resolve') assert.equal(model.closes, 1);
+    });
+  }
+}
+
+for (const restart of [false, true]) {
+  for (const outcome of ['resolve', 'reject']) {
+    test(`obsolete camera downgrade ${outcome} cannot change a ${restart ? 'new pending downgrade' : 'reset session'}`, async () => {
+      const h = harness(), delayed = deferred();
+      const { camera } = await start(h);
+      camera.track.applyConstraints = () => delayed.promise;
+      const oldRequest = h.downgradeCameraQuality();
+      assert.equal(h.state().cameraConstraintPending, true);
+      h.resetExperience();
+      const current = restart ? await start(h) : null;
+      const newDelay = deferred();
+      if (current) current.camera.track.applyConstraints = () => newDelay.promise;
+      const newRequest = current ? h.downgradeCameraQuality() : null;
+      const ui = cameraUi(h);
+      if (outcome === 'resolve') delayed.resolve();
+      else delayed.reject(new Error('obsolete camera constraint failure'));
+      await oldRequest;
+      assert.deepEqual(cameraUi(h), ui, 'old completion must not change diagnostics, hints, or a newer pending flag');
+      assert.equal(h.warnings.length, 0, 'obsolete failures are not current session failures');
+      assert.equal(h.video.srcObject, current?.camera ?? null);
+      if (current) {
+        assert.equal(current.camera.track.stops, 0);
+        newDelay.resolve(); await newRequest;
+        assert.equal(h.state().cameraQualityIndex, 2);
+        assert.equal(h.state().cameraConstraintPending, false);
+        assert.equal(h.video.dataset.cameraTier, 'efficient');
+      }
+    });
+  }
+}
+
+test('current camera downgrade failure clears the pending flag and allows retry', async () => {
+  const h = harness(), delayed = deferred();
+  const { camera } = await start(h);
+  camera.track.applyConstraints = () => delayed.promise;
+  const before = cameraUi(h), pending = h.downgradeCameraQuality();
+  delayed.reject(new Error('current camera constraint failure')); await pending;
+  assert.deepEqual(cameraUi(h), before);
+  assert.equal(h.warnings.length, 1);
+  camera.track.applyConstraints = async value => { camera.track.constraints.push(value); };
+  await h.downgradeCameraQuality();
+  assert.equal(camera.track.constraints.length, 1);
+  assert.equal(h.state().cameraQualityIndex, 2);
+  assert.equal(h.state().cameraConstraintPending, false);
+});
 
 test('successful start, audio toggle, and reset release only acquired resources', async () => {
   const h = harness();

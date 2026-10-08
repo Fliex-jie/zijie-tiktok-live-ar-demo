@@ -394,7 +394,10 @@ function updateCameraDiagnostics(profile: CameraProfile): void {
 
 async function downgradeCameraQuality(): Promise<void> {
   if (!stream || cameraConstraintPending || cameraQualityIndex >= CAMERA_PROFILES.length - 1) return;
-  const track = stream.getVideoTracks()[0];
+  const cameraStream = stream;
+  const generation = experienceGeneration;
+  const isCurrentRequest = (): boolean => generation === experienceGeneration && stream === cameraStream;
+  const track = cameraStream.getVideoTracks()[0];
   if (!track) return;
 
   cameraConstraintPending = true;
@@ -402,6 +405,7 @@ async function downgradeCameraQuality(): Promise<void> {
   const nextProfile = CAMERA_PROFILES[nextIndex];
   try {
     await track.applyConstraints(cameraConstraints(nextProfile));
+    if (!isCurrentRequest()) return;
     cameraQualityIndex = nextIndex;
     cameraStartedAt = performance.now();
     cameraPoorPerformanceWindows = 0;
@@ -409,9 +413,10 @@ async function downgradeCameraQuality(): Promise<void> {
     resizeCanvas();
     hint.textContent = `检测到设备运行压力，摄像头已自动调整为 ${nextProfile.label}。`;
   } catch (error) {
-    console.warn('Unable to lower camera resolution automatically.', error);
+    if (isCurrentRequest()) console.warn('Unable to lower camera resolution automatically.', error);
   } finally {
-    cameraConstraintPending = false;
+    // Reset may already have started another session's downgrade request.
+    if (isCurrentRequest()) cameraConstraintPending = false;
   }
 }
 
@@ -1650,6 +1655,7 @@ async function startExperience(): Promise<void> {
   let started = false;
   setUiState('loading', '正在请求摄像头权限并加载 Face Landmarker…');
   startButton.disabled = true;
+  resetButton.disabled = false;
   // Handle model rejection immediately while camera permission is pending.
   const landmarkerResult = loadFaceLandmarker().then(
     (model) => ({ model }),
