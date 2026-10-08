@@ -293,6 +293,9 @@ const rainFrameSamplerContext = rainFrameSampler.getContext('2d');
 
 let faceLandmarker: FaceLandmarker | null = null;
 let faceLandmarkerLoadPromise: Promise<FaceLandmarker> | null = null;
+let experienceGeneration = 0;
+let audioRequestVersion = 0;
+let audioRequestPending = false;
 let stream: MediaStream | null = null;
 let audioStream: MediaStream | null = null;
 let audioContext: AudioContext | null = null;
@@ -608,11 +611,20 @@ async function enableAudioAssist(): Promise<void> {
     disableAudioAssist();
     return;
   }
+  if (uiState !== 'running' || audioRequestPending) return;
 
+  const requestVersion = ++audioRequestVersion;
+  const generation = experienceGeneration;
+  const isCurrentRequest = (): boolean => requestVersion === audioRequestVersion &&
+    generation === experienceGeneration && uiState === 'running';
+  let requestedStream: MediaStream | null = null;
+  let requestedContext: AudioContext | null = null;
+  let activated = false;
+  audioRequestPending = true;
   audioButton.disabled = true;
   updateAudioStatus('正在请求麦克风权限…', false);
   try {
-    audioStream = await navigator.mediaDevices.getUserMedia({
+    requestedStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
@@ -620,10 +632,16 @@ async function enableAudioAssist(): Promise<void> {
       },
       video: false,
     });
-    audioContext = new AudioContext();
-    if (audioContext.state === 'suspended') await audioContext.resume();
-    const source = audioContext.createMediaStreamSource(audioStream);
-    audioAnalyser = audioContext.createAnalyser();
+    if (!isCurrentRequest()) return;
+    // Publish acquired resources before resume so reset can release them
+    // immediately, even while the browser is still resuming audio.
+    audioStream = requestedStream;
+    requestedContext = new AudioContext();
+    audioContext = requestedContext;
+    if (requestedContext.state === 'suspended') await requestedContext.resume();
+    if (!isCurrentRequest()) return;
+    const source = requestedContext.createMediaStreamSource(requestedStream);
+    audioAnalyser = requestedContext.createAnalyser();
     audioAnalyser.fftSize = 512;
     audioAnalyser.smoothingTimeConstant = 0.65;
     source.connect(audioAnalyser);
@@ -642,26 +660,45 @@ async function enableAudioAssist(): Promise<void> {
     updateAudioStatus('声音辅助已开启 · 自适应环境音量', true);
     hint.textContent = '声音辅助已开启：系统会根据环境底噪和近期峰值辅助确认大笑。';
     updateHud();
+    activated = true;
   } catch (error) {
+    if (!isCurrentRequest()) return;
     console.error(error);
-    audioStream?.getTracks().forEach((track) => track.stop());
-    audioStream = null;
+    audioAnalyser?.disconnect();
+    audioAnalyser = null;
+    audioSamples = null;
+    audioEnabled = false;
     audioButton.textContent = '开启声音辅助';
     audioButton.disabled = false;
     updateAudioStatus('麦克风未启用 · 继续使用纯视觉模式', false);
     hint.textContent = error instanceof DOMException && error.name === 'NotAllowedError'
       ? '麦克风权限被拒绝，摄像头识别仍可继续。'
       : '麦克风初始化失败，摄像头识别仍可继续。';
+  } finally {
+    if (!activated) {
+      requestedStream?.getTracks().forEach((track) => track.stop());
+      if (requestedContext && requestedContext.state !== 'closed') {
+        void requestedContext.close().catch((error) => console.warn('Unable to close audio context.', error));
+      }
+      // A stale request must never clear a newer session's resources.
+      if (audioStream === requestedStream) audioStream = null;
+      if (audioContext === requestedContext) audioContext = null;
+    }
+    if (requestVersion === audioRequestVersion) audioRequestPending = false;
   }
 }
 
 function disableAudioAssist(): void {
+  audioRequestVersion += 1;
+  audioRequestPending = false;
   audioStream?.getTracks().forEach((track) => track.stop());
   audioStream = null;
   audioAnalyser?.disconnect();
   audioAnalyser = null;
   audioSamples = null;
-  void audioContext?.close();
+  if (audioContext && audioContext.state !== 'closed') {
+    void audioContext.close().catch((error) => console.warn('Unable to close audio context.', error));
+  }
   audioContext = null;
   audioEnabled = false;
   audioLevel = 0;
@@ -1472,7 +1509,11 @@ function render(now: number): void {
     requestAnimationFrame(render);
     return;
   }
-  lastVisualFrameAt = now;
+  // Preserve the frame-budget phase across display refresh rates; never catch up by rendering extra frames.
+  lastVisualFrameAt = Number.isFinite(lastVisualFrameAt)
+    ? lastVisualFrameAt
+      + Math.max(1, Math.floor((now - lastVisualFrameAt + 1) / RENDER_INTERVAL_MS)) * RENDER_INTERVAL_MS
+    : now;
   const elapsedSeconds = Math.max(0, (now - previousRenderAt) / 1000);
   const deltaSeconds = Math.min(0.05, elapsedSeconds);
   previousRenderAt = now;
@@ -1592,9 +1633,10 @@ async function createLandmarker(): Promise<FaceLandmarker> {
 
 function loadFaceLandmarker(): Promise<FaceLandmarker> {
   if (!faceLandmarkerLoadPromise) {
-    faceLandmarkerLoadPromise = createLandmarker().catch((error) => {
-      faceLandmarkerLoadPromise = null;
-      throw error;
+    const pending = createLandmarker();
+    faceLandmarkerLoadPromise = pending;
+    void pending.catch(() => {
+      if (faceLandmarkerLoadPromise === pending) faceLandmarkerLoadPromise = null;
     });
   }
   return faceLandmarkerLoadPromise;
@@ -1602,50 +1644,85 @@ function loadFaceLandmarker(): Promise<FaceLandmarker> {
 
 async function startExperience(): Promise<void> {
   if (uiState === 'loading' || uiState === 'running') return;
+  const generation = ++experienceGeneration;
+  const isCurrentRequest = (): boolean => generation === experienceGeneration;
+  let requestedStream: MediaStream | null = null;
+  let started = false;
   setUiState('loading', '正在请求摄像头权限并加载 Face Landmarker…');
   startButton.disabled = true;
-  const landmarkerPromise = loadFaceLandmarker();
+  // Handle model rejection immediately while camera permission is pending.
+  const landmarkerResult = loadFaceLandmarker().then(
+    (model) => ({ model }),
+    (error: unknown) => ({ error }),
+  );
 
   try {
     cameraQualityIndex = chooseInitialCameraQuality();
     const initialCameraProfile = CAMERA_PROFILES[cameraQualityIndex];
-    stream = await navigator.mediaDevices.getUserMedia({
+    requestedStream = await navigator.mediaDevices.getUserMedia({
       video: cameraConstraints(initialCameraProfile),
       audio: false,
     });
-    video.srcObject = stream;
+    if (!isCurrentRequest()) return;
+    stream = requestedStream;
+    video.srcObject = requestedStream;
     await video.play();
+    if (!isCurrentRequest()) return;
     cameraStartedAt = performance.now();
     cameraPoorPerformanceWindows = 0;
     updateCameraDiagnostics(initialCameraProfile);
     resizeCanvas();
     stageMessage.querySelector('strong')!.textContent = '摄像头已开启';
     stageMessage.querySelector('span')!.textContent = '正在初始化人脸识别，首次打开可能需要几秒钟…';
-    faceLandmarker = await landmarkerPromise;
+    const result = await landmarkerResult;
+    if (!isCurrentRequest()) return;
+    if ('error' in result) throw result.error;
+    faceLandmarker = result.model;
     stageMessage.classList.add('hidden');
     resetButton.disabled = false;
     audioButton.disabled = false;
     updateAudioStatus('声音辅助关闭 · 不读取麦克风', false);
     setUiState('running', '请自然微笑、露齿大笑或张嘴；需要时可开启声音辅助。');
+    started = true;
   } catch (error) {
+    if (!isCurrentRequest()) return;
     console.error(error);
     const message = error instanceof DOMException && error.name === 'NotAllowedError'
       ? '摄像头权限被拒绝，请在浏览器地址栏中允许摄像头后重试。'
       : '初始化失败。请确认使用 HTTPS 或 localhost，并检查摄像头和网络连接。';
     setUiState('error', message);
     startButton.disabled = false;
+    resetButton.disabled = true;
+    audioButton.disabled = true;
     stageMessage.classList.remove('hidden');
     stageMessage.querySelector('strong')!.textContent = '无法开始';
     stageMessage.querySelector('span')!.textContent = message;
+  } finally {
+    if (!started) {
+      requestedStream?.getTracks().forEach((track) => track.stop());
+      if (stream === requestedStream) stream = null;
+      if (video.srcObject === requestedStream) {
+        video.pause();
+        video.srcObject = null;
+      }
+    }
   }
 }
 
 function resetExperience(): void {
+  experienceGeneration += 1;
   disableAudioAssist();
   stream?.getTracks().forEach((track) => track.stop());
   stream = null;
   video.srcObject = null;
-  faceLandmarker?.close();
+  if (faceLandmarker) {
+    faceLandmarker.close();
+  } else if (faceLandmarkerLoadPromise) {
+    // Dispose a pending preload when it eventually finishes after reset.
+    void faceLandmarkerLoadPromise.then((model) => model.close(), () => {}).catch((error) => {
+      console.warn('Unable to close a cancelled face model.', error);
+    });
+  }
   faceLandmarker = null;
   faceLandmarkerLoadPromise = null;
   latestLandmarks = null;
